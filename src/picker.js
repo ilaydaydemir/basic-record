@@ -147,6 +147,7 @@ async function doLogin(isSignup) {
   loginBtn.textContent = isSignup ? 'Create Account' : 'Sign In';
   if (res.ok) {
     loginOverlay.style.display = 'none';
+    showUserBadge(email);
   } else {
     showLoginError(res.error || 'Authentication failed');
   }
@@ -166,11 +167,35 @@ skipBtn.addEventListener('click', () => {
   loginOverlay.style.display = 'none';
 });
 
-// Check if already logged in — skip overlay
+// Check if already logged in — skip overlay and show user badge
+const userBadge      = document.getElementById('user-badge');
+const userEmailLabel = document.getElementById('user-email-label');
+const logoutBtn      = document.getElementById('logout-btn');
+
+function showUserBadge(email) {
+  userEmailLabel.textContent = email;
+  userBadge.style.display = 'flex';
+}
+
+logoutBtn.addEventListener('click', async () => {
+  await window.api.userLogout();
+  userBadge.style.display = 'none';
+  loginOverlay.style.display = 'flex';
+  loginEmail.value = '';
+  loginPass.value  = '';
+  loginError.style.display = 'none';
+  loginIsSignup = false;
+  loginBtn.textContent  = 'Sign In';
+  signupBtn.textContent = 'Create account';
+});
+
 (async () => {
   try {
     const session = await window.api.getUserSession();
-    if (session?.access_token) loginOverlay.style.display = 'none';
+    if (session?.access_token) {
+      loginOverlay.style.display = 'none';
+      if (session.email) showUserBadge(session.email);
+    }
   } catch {}
 })();
 

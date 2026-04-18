@@ -57,6 +57,7 @@ contextBridge.exposeInMainWorld('api', {
   // Auth
   userLogin:          (opts)   => ipcRenderer.invoke('user-login', opts),
   getUserSession:     ()       => ipcRenderer.invoke('get-user-session'),
+  userLogout:         ()       => ipcRenderer.invoke('user-logout'),
 
   // Editor
   readFile:           (fp)     => ipcRenderer.invoke('read-file', fp),

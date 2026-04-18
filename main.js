@@ -356,6 +356,12 @@ ipcMain.handle('get-user-session', async () => {
   return _userSession || null;
 });
 
+ipcMain.handle('user-logout', () => {
+  _userSession = null;
+  try { fs.unlinkSync(userSessionPath()); } catch {}
+  return { ok: true };
+});
+
 ipcMain.handle('get-device-session', async () => {
   // Prefer real user session over anonymous device session
   if (_userSession?.access_token) return _userSession;

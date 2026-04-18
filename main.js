@@ -77,9 +77,14 @@ async function ensureDeviceSession() {
   let r = await sbFetch('/auth/v1/token?grant_type=password', { method: 'POST', body: creds });
   if (r.status !== 200) {
     r = await sbFetch('/auth/v1/signup', { method: 'POST', body: creds });
+    // After signup, sign in to get tokens (signup may return session directly)
+    if (r.status === 200 && !r.body.access_token) {
+      r = await sbFetch('/auth/v1/token?grant_type=password', { method: 'POST', body: creds });
+    }
   }
-  if (r.status === 200 && r.body.access_token) {
-    saveDeviceSession({ access_token: r.body.access_token, refresh_token: r.body.refresh_token, user_id: r.body.user?.id || r.body.id, email: creds.email });
+  if ((r.status === 200 || r.status === 201) && r.body.access_token) {
+    const uid = r.body.user?.id || r.body.id;
+    saveDeviceSession({ access_token: r.body.access_token, refresh_token: r.body.refresh_token, user_id: uid, email: creds.email });
     return _deviceSession;
   }
   return null;

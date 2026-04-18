@@ -123,3 +123,7 @@ startBtn.addEventListener('click', async () => {
 // Init
 loadDevices();
 loadSources();
+
+document.getElementById('open-file-btn').addEventListener('click', () => {
+  window.api.openExistingFile();
+});

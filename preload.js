@@ -56,6 +56,10 @@ contextBridge.exposeInMainWorld('api', {
 
   // Editor
   readFile:           (fp)     => ipcRenderer.invoke('read-file', fp),
+  getDeviceSession:   ()       => ipcRenderer.invoke('get-device-session'),
+  openExistingFile:   ()       => ipcRenderer.invoke('open-existing-file'),
+  getFileSize:        (fp)     => ipcRenderer.invoke('get-file-size', fp),
+  readFileChunk:      (fp, s, l) => ipcRenderer.invoke('read-file-chunk', fp, s, l),
   exportVideo:        (data)   => ipcRenderer.invoke('export-video', data),
   getSavePath:        ()       => ipcRenderer.invoke('get-save-path'),
   writeExport:        (data)   => ipcRenderer.invoke('write-export', data),

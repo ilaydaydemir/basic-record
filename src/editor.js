@@ -53,6 +53,8 @@ window.api.onLoadVideo(fp => {
   currentFilePath = fp;
   video.src = `file://${fp}`;
   video.load();
+  // Start background upload if session exists
+  autoUpload();
 });
 
 video.addEventListener('loadedmetadata', () => {
@@ -857,8 +859,7 @@ async function runExport(preset) {
   exportStatus.textContent = 'Writing file…';
   const blob   = new Blob(chunks, { type: mimeType });
   const buf    = await blob.arrayBuffer();
-  const uint8  = Array.from(new Uint8Array(buf));
-  const result = await window.api.writeExport({ filePath: savePath, buffer: uint8 });
+  const result = await window.api.writeExport({ filePath: savePath, buffer: buf });
 
   exportStatus.textContent = result?.ok ? `✓ Saved (${preset.name})!` : `Error: ${result?.error || 'failed'}`;
   setTimeout(() => { exportStatus.textContent = ''; }, 4000);
@@ -903,6 +904,7 @@ document.getElementById('back-btn').addEventListener('click', () => {
 // ════════════════════════════════════════════════════════
 
 const SUPABASE_URL  = 'https://bgsvuywxejpmkstgqizq.supabase.co';
+
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2MDc0MzMsImV4cCI6MjA4NzE4MzQzM30.EvHOy5sBbXzSxjRS5vPGzm8cnFrOXxDfclP-ru3VU_M';
 const APP_URL       = 'https://screencast-eight.vercel.app';
 const CHUNK_SIZE    = 8 * 1024 * 1024; // 8 MB per chunk
@@ -915,6 +917,123 @@ try {
   const saved = localStorage.getItem('br_upload_session');
   if (saved) _uploadSession = JSON.parse(saved);
 } catch {}
+
+// ── Auto-upload status bar helpers ────────────────────────
+const _auBar      = () => document.getElementById('auto-upload-bar');
+const _auLabel    = () => document.getElementById('auto-upload-label');
+const _auPbar     = () => document.getElementById('auto-upload-pbar');
+const _auShareBtn = () => document.getElementById('auto-upload-share-btn');
+
+function _auShow(state, text, pct) {
+  const bar = _auBar();
+  bar.className = state; // '', 'uploading', 'error'
+  bar.style.display = 'flex';
+  _auLabel().textContent = text;
+  _auPbar().style.width = (pct ?? 0) + '%';
+}
+
+function _auDone(publicUrl) {
+  const bar = _auBar();
+  bar.className = '';
+  bar.style.display = 'flex';
+  _auPbar().style.width = '100%';
+  _auLabel().textContent = 'Uploaded';
+  const btn = _auShareBtn();
+  btn.style.display = 'inline-block';
+  btn.onclick = () => window.api.openExternal(publicUrl);
+}
+
+function _auError(msg) {
+  _auShow('error', 'Upload failed: ' + msg, 0);
+}
+
+// ── Auto-upload: fires when editor opens with a logged-in session ──
+async function autoUpload() {
+  if (!currentFilePath) return;
+  // Discard sessions without a refresh token
+  if (_uploadSession && !_uploadSession.refresh_token) {
+    _uploadSession = null;
+    localStorage.removeItem('br_upload_session');
+  }
+  // Fall back to auto device session if no manual login
+  if (!_uploadSession) {
+    _auShow('uploading', 'Setting up upload…', 1);
+    const deviceSess = await window.api.getDeviceSession().catch(() => null);
+    if (!deviceSess) { _auBar().style.display = 'none'; return; }
+    _uploadSession = deviceSess;
+  }
+
+  try {
+    // 1. Silently refresh the token
+    _auShow('uploading', 'Preparing upload…', 2);
+    try {
+      const refRes = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON },
+        body: JSON.stringify({ refresh_token: _uploadSession.refresh_token }),
+      });
+      if (refRes.ok) {
+        const refData = await refRes.json();
+        _uploadSession.access_token  = refData.access_token;
+        _uploadSession.refresh_token = refData.refresh_token;
+        localStorage.setItem('br_upload_session', JSON.stringify(_uploadSession));
+      } else {
+        // Token refresh failed — clear session, don't block the user
+        _uploadSession = null;
+        localStorage.removeItem('br_upload_session');
+        _auBar().style.display = 'none';
+        return;
+      }
+    } catch {
+      // Network error during refresh — attempt upload with existing token
+    }
+
+    const { access_token, user_id } = _uploadSession;
+    const recordId   = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const objectPath = `recordings/${user_id}/${recordId}.webm`;
+
+    // 2. Get file size
+    _auShow('uploading', 'Reading file…', 4);
+    const fileSize = await window.api.getFileSize(currentFilePath);
+    if (!fileSize) { _auError('Could not read recording file'); return; }
+
+    // 3. Upload in chunks
+    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+    for (let i = 0; i < totalChunks; i++) {
+      const start = i * CHUNK_SIZE;
+      const len   = Math.min(CHUNK_SIZE, fileSize - start);
+      const chunk = await window.api.readFileChunk(currentFilePath, start, len);
+      if (!chunk) { _auError(`Could not read chunk ${i}`); return; }
+
+      const pct = Math.round(5 + ((i + 1) / totalChunks) * 90);
+      _auShow('uploading', `Uploading… ${pct}%`, pct);
+
+      const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${objectPath}`, {
+        method: i === 0 ? 'POST' : 'PUT',
+        headers: {
+          Authorization: `Bearer ${access_token}`,
+          apikey: SUPABASE_ANON,
+          'Content-Type': 'application/octet-stream',
+          'x-upsert': 'true',
+          'Content-Range': `bytes ${start}-${start + len - 1}/${fileSize}`,
+        },
+        body: chunk,
+      });
+      if (!upRes.ok) {
+        const e = await upRes.json().catch(() => ({}));
+        _auError(e.message || e.error || `chunk ${i} failed`);
+        return;
+      }
+    }
+
+    // 4. Done — show Share button
+    const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${objectPath}`;
+    _auDone(publicUrl);
+
+  } catch (err) {
+    _auError(err.message || 'Unknown error');
+  }
+}
 
 document.getElementById('upload-web-btn').addEventListener('click', () => {
   openUploadModal();
@@ -1033,43 +1152,46 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
     const { access_token, user_id } = _uploadSession;
     const title    = document.getElementById('upload-title').value.trim() || 'Recording';
     const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const storagePath = `${user_id}/${recordId}.webm`;
+    const objectPath = `recordings/${user_id}/${recordId}.webm`;
 
-    // ── 2. Read file ──────────────────────────────────────
-    statusEl.textContent = 'Reading file…';
-    pfill.style.width = '10%';
-    const arr = await window.api.readFile(currentFilePath);
-    if (!arr) throw new Error('Could not read recording file');
-    const buffer = new Uint8Array(arr);
+    // ── 2. Get file size ──────────────────────────────────
+    statusEl.textContent = 'Preparing…';
+    pfill.style.width = '5%';
+    const fileSize = await window.api.getFileSize(currentFilePath);
+    if (!fileSize) throw new Error('Could not read recording file');
 
-    // ── 3. Upload in chunks directly to Supabase storage ──
-    const totalChunks = Math.ceil(buffer.byteLength / CHUNK_SIZE);
-    const uploadedChunkPaths = [];
-
+    // ── 3. Upload in chunks (read from disk, never full RAM) ──
+    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
     for (let i = 0; i < totalChunks; i++) {
-      const start     = i * CHUNK_SIZE;
-      const chunk     = buffer.slice(start, start + CHUNK_SIZE);
-      const chunkPath = `recordings/${user_id}/${recordId}/chunk-${String(i).padStart(4, '0')}`;
+      const start  = i * CHUNK_SIZE;
+      const len    = Math.min(CHUNK_SIZE, fileSize - start);
+      const chunk  = await window.api.readFileChunk(currentFilePath, start, len);
+      if (!chunk) throw new Error(`Could not read chunk ${i}`);
 
       statusEl.textContent = `Uploading… ${i + 1}/${totalChunks}`;
-      pfill.style.width = (10 + ((i + 1) / totalChunks) * 75) + '%';
+      pfill.style.width = (5 + ((i + 1) / totalChunks) * 85) + '%';
 
-      let upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${chunkPath}`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${access_token}`, apikey: SUPABASE_ANON, 'Content-Type': 'application/octet-stream', 'x-upsert': 'true' },
+      const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${objectPath}`, {
+        method: i === 0 ? 'POST' : 'PUT',
+        headers: {
+          Authorization: `Bearer ${access_token}`,
+          apikey: SUPABASE_ANON,
+          'Content-Type': 'application/octet-stream',
+          'x-upsert': 'true',
+          'Content-Range': `bytes ${start}-${start + len - 1}/${fileSize}`,
+        },
         body: chunk,
       });
       if (!upRes.ok) {
         const e = await upRes.json().catch(() => ({}));
-        throw new Error(e.message || e.error || `Upload failed (chunk ${i})`);
+        throw new Error(e.message || e.error || `Upload failed at chunk ${i}`);
       }
-      uploadedChunkPaths.push(chunkPath);
     }
 
     // ── 4. Build public URL ───────────────────────────────
-    pfill.style.width = '90%';
+    pfill.style.width = '95%';
     statusEl.textContent = 'Finalizing…';
-    const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${uploadedChunkPaths[0]}`;
+    const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${objectPath}`;
 
     pfill.style.width = '100%';
     progWrap.style.display = 'none';

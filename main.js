@@ -1,7 +1,89 @@
 const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, screen } = require('electron');
-const path = require('path');
-const fs   = require('fs');
-const os   = require('os');
+const path  = require('path');
+const fs    = require('fs');
+const os    = require('os');
+const https = require('https');
+
+// ── Auto-upload session (persisted across app restarts) ────
+const SUPABASE_URL  = 'https://bgsvuywxejpmkstgqizq.supabase.co';
+const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2MDc0MzMsImV4cCI6MjA4NzE4MzQzM30.EvHOy5sBbXzSxjRS5vPGzm8cnFrOXxDfclP-ru3VU_M';
+let _deviceSession = null;
+
+function deviceFilePath() {
+  return path.join(app.getPath('userData'), 'device-session.json');
+}
+
+function loadDeviceSession() {
+  try {
+    const raw = fs.readFileSync(deviceFilePath(), 'utf8');
+    _deviceSession = JSON.parse(raw);
+  } catch {}
+}
+
+function saveDeviceSession(s) {
+  _deviceSession = s;
+  try { fs.writeFileSync(deviceFilePath(), JSON.stringify(s)); } catch {}
+}
+
+function sbFetch(urlPath, opts = {}) {
+  return new Promise((resolve, reject) => {
+    const body = opts.body ? Buffer.from(JSON.stringify(opts.body)) : null;
+    const req  = https.request(`${SUPABASE_URL}${urlPath}`, {
+      method:  opts.method || 'GET',
+      headers: {
+        'Content-Type':  'application/json',
+        'apikey':        SUPABASE_ANON,
+        ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
+        ...(body ? { 'Content-Length': body.length } : {}),
+      },
+    }, res => {
+      let data = '';
+      res.on('data', d => { data += d; });
+      res.on('end', () => {
+        try { resolve({ status: res.statusCode, body: JSON.parse(data) }); }
+        catch { resolve({ status: res.statusCode, body: data }); }
+      });
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+async function ensureDeviceSession() {
+  // Try to refresh existing session first
+  if (_deviceSession?.refresh_token) {
+    const r = await sbFetch('/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST', body: { refresh_token: _deviceSession.refresh_token },
+    });
+    if (r.status === 200 && r.body.access_token) {
+      saveDeviceSession({ ..._deviceSession, access_token: r.body.access_token, refresh_token: r.body.refresh_token });
+      return _deviceSession;
+    }
+  }
+
+  // Generate device credentials
+  const deviceFile = deviceFilePath();
+  let creds;
+  try { creds = JSON.parse(fs.readFileSync(deviceFile.replace('.json', '-creds.json'), 'utf8')); } catch {}
+  if (!creds) {
+    const uid  = require('crypto').randomUUID();
+    const pass = require('crypto').randomBytes(24).toString('base64url');
+    creds = { email: `device-${uid}@br-device.app`, password: pass };
+    try { fs.writeFileSync(deviceFile.replace('.json', '-creds.json'), JSON.stringify(creds)); } catch {}
+  }
+
+  // Try sign in, fall back to sign up
+  let r = await sbFetch('/auth/v1/token?grant_type=password', { method: 'POST', body: creds });
+  if (r.status !== 200) {
+    r = await sbFetch('/auth/v1/signup', { method: 'POST', body: creds });
+  }
+  if (r.status === 200 && r.body.access_token) {
+    saveDeviceSession({ access_token: r.body.access_token, refresh_token: r.body.refresh_token, user_id: r.body.user?.id || r.body.id, email: creds.email });
+    return _deviceSession;
+  }
+  return null;
+}
 
 let pickerWin   = null;
 let bubbleWin   = null;
@@ -73,15 +155,16 @@ function createEditor(filePath) {
   });
   editorWin.on('closed', () => {
     editorWin = null;
-    try { if (filePath.includes(os.tmpdir())) fs.unlinkSync(filePath); } catch {}
-    // Always return to picker when editor closes
+    // Keep the file — it's in ~/Movies/Basic Record/, user can access it
     if (pickerWin) pickerWin.show();
     else createPicker();
   });
 }
 
 // ── App ready ──────────────────────────────────────────────
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  loadDeviceSession();
+  ensureDeviceSession().catch(() => {}); // background, don't block startup
   createPicker();
   app.on('activate', () => { if (!pickerWin) createPicker(); });
 });
@@ -144,9 +227,15 @@ ipcMain.on('restart-recording', () => {
 // ── IPC: save temp file → open editor ─────────────────────
 // ── IPC: streaming temp file (write chunks as they arrive) ──
 let _streamPath = null;
+function getRecordingsDir() {
+  const dir = path.join(app.getPath('home'), 'Movies', 'Basic Record');
+  try { fs.mkdirSync(dir, { recursive: true }); } catch {}
+  return dir;
+}
+
 ipcMain.handle('create-temp-file', () => {
-  _streamPath = path.join(os.tmpdir(), `br-${Date.now()}.webm`);
-  fs.writeFileSync(_streamPath, Buffer.alloc(0)); // create empty file
+  _streamPath = path.join(getRecordingsDir(), `br-${Date.now()}.webm`);
+  fs.writeFileSync(_streamPath, Buffer.alloc(0));
   return _streamPath;
 });
 ipcMain.handle('append-chunk', (_, arrayBuf) => {
@@ -162,6 +251,17 @@ ipcMain.handle('save-temp', async (_, arrayBuf) => {
   fs.writeFileSync(tmpPath, Buffer.from(arrayBuf));
   _streamPath = null;
   return tmpPath;
+});
+
+// ── IPC: open existing file in editor ─────────────────────
+ipcMain.handle('open-existing-file', async () => {
+  const { filePath, canceled } = await dialog.showOpenDialog(pickerWin || editorWin, {
+    filters: [{ name: 'Video', extensions: ['webm', 'mp4', 'mov'] }],
+    properties: ['openFile'],
+  });
+  if (canceled || !filePath?.[0]) return;
+  pickerWin?.hide();
+  createEditor(filePath[0]);
 });
 
 ipcMain.on('open-editor', (_, filePath) => {
@@ -196,12 +296,28 @@ ipcMain.handle('read-file', (_, fp) => {
   try { return Array.from(new Uint8Array(fs.readFileSync(fp))); }
   catch { return null; }
 });
+ipcMain.handle('get-device-session', async () => {
+  const s = await ensureDeviceSession();
+  return s;
+});
+
+ipcMain.handle('get-file-size', (_, fp) => {
+  try { return fs.statSync(fp).size; } catch { return 0; }
+});
+ipcMain.handle('read-file-chunk', (_, fp, start, len) => {
+  try {
+    const buf = Buffer.alloc(len);
+    const fd  = fs.openSync(fp, 'r');
+    const read = fs.readSync(fd, buf, 0, len, start);
+    fs.closeSync(fd);
+    return buf.buffer.slice(0, read);
+  } catch { return null; }
+});
 
 // ── IPC: write exported file ────────────────────────────────
 ipcMain.handle('write-export', async (_, { filePath, buffer }) => {
   try {
-    const buf = Array.isArray(buffer) ? Buffer.from(buffer) : Buffer.from(new Uint8Array(buffer));
-    fs.writeFileSync(filePath, buf);
+    fs.writeFileSync(filePath, Buffer.from(buffer));
     shell.showItemInFolder(filePath);
     return { ok: true };
   } catch (e) {

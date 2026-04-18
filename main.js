@@ -169,6 +169,7 @@ function createEditor(filePath) {
 // ── App ready ──────────────────────────────────────────────
 app.whenReady().then(async () => {
   loadDeviceSession();
+  loadUserSession();
   ensureDeviceSession().catch(() => {}); // background, don't block startup
   createPicker();
   app.on('activate', () => { if (!pickerWin) createPicker(); });
@@ -301,7 +302,63 @@ ipcMain.handle('read-file', (_, fp) => {
   try { return Array.from(new Uint8Array(fs.readFileSync(fp))); }
   catch { return null; }
 });
+// ── User session (real login, stored separately from device session) ──
+let _userSession = null;
+function userSessionPath() { return path.join(app.getPath('userData'), 'user-session.json'); }
+function loadUserSession() {
+  try { _userSession = JSON.parse(fs.readFileSync(userSessionPath(), 'utf8')); } catch {}
+}
+function saveUserSession(s) {
+  _userSession = s;
+  try { fs.writeFileSync(userSessionPath(), JSON.stringify(s)); } catch {}
+}
+
+ipcMain.handle('user-login', async (_, { email, password, isSignup }) => {
+  try {
+    const endpoint = isSignup ? '/auth/v1/signup' : '/auth/v1/token?grant_type=password';
+    let r = await sbFetch(endpoint, { method: 'POST', body: { email, password } });
+    // After signup, sign in to get tokens
+    if (isSignup && r.status === 200 && !r.body.access_token) {
+      r = await sbFetch('/auth/v1/token?grant_type=password', { method: 'POST', body: { email, password } });
+    }
+    if ((r.status === 200 || r.status === 201) && r.body.access_token) {
+      const session = {
+        access_token: r.body.access_token,
+        refresh_token: r.body.refresh_token,
+        user_id: r.body.user?.id,
+        email,
+      };
+      saveUserSession(session);
+      return { ok: true };
+    }
+    const msg = r.body?.error_description || r.body?.msg || r.body?.message || 'Login failed';
+    return { ok: false, error: msg };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('get-user-session', async () => {
+  // Try to refresh user session if it exists
+  if (_userSession?.refresh_token) {
+    const r = await sbFetch('/auth/v1/token?grant_type=refresh_token', {
+      method: 'POST', body: { refresh_token: _userSession.refresh_token },
+    });
+    if (r.status === 200 && r.body.access_token) {
+      saveUserSession({ ..._userSession, access_token: r.body.access_token, refresh_token: r.body.refresh_token });
+      return _userSession;
+    }
+    // Refresh failed — clear stored session
+    _userSession = null;
+    try { fs.unlinkSync(userSessionPath()); } catch {}
+    return null;
+  }
+  return _userSession || null;
+});
+
 ipcMain.handle('get-device-session', async () => {
+  // Prefer real user session over anonymous device session
+  if (_userSession?.access_token) return _userSession;
   const s = await ensureDeviceSession();
   return s;
 });

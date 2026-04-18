@@ -54,6 +54,10 @@ contextBridge.exposeInMainWorld('api', {
   notifySwitchSource: (id)     => ipcRenderer.send('switch-source-chosen', id),
   regionSelected:     (rect)   => ipcRenderer.send('region-selected', rect),
 
+  // Auth
+  userLogin:          (opts)   => ipcRenderer.invoke('user-login', opts),
+  getUserSession:     ()       => ipcRenderer.invoke('get-user-session'),
+
   // Editor
   readFile:           (fp)     => ipcRenderer.invoke('read-file', fp),
   getDeviceSession:   ()       => ipcRenderer.invoke('get-device-session'),

@@ -110,6 +110,45 @@ select:focus { border-color: #3a3a3a; }
   </div>
 </div>
 
+<!-- Login overlay -->
+<div id="login-overlay" style="
+  position:fixed; inset:0; background:#111; z-index:100;
+  display:flex; flex-direction:column; align-items:center; justify-content:center;
+  padding:32px 28px; gap:16px;
+">
+  <div style="font-size:22px; font-weight:800; color:#fff; margin-bottom:4px;">Basic Record</div>
+  <div style="font-size:13px; color:#555; margin-bottom:8px;">Sign in to save your recordings to the cloud</div>
+
+  <div id="login-error" style="
+    display:none; background:#2a1111; border:1px solid #ef4444;
+    border-radius:7px; color:#f87171; font-size:12px; padding:8px 12px; width:100%;
+  "></div>
+
+  <input id="login-email" type="email" placeholder="Email" style="
+    background:#1a1a1a; border:1px solid #2a2a2a; color:#ccc;
+    border-radius:7px; padding:10px 12px; font-size:13px; outline:none; width:100%;
+  " />
+  <input id="login-pass" type="password" placeholder="Password" style="
+    background:#1a1a1a; border:1px solid #2a2a2a; color:#ccc;
+    border-radius:7px; padding:10px 12px; font-size:13px; outline:none; width:100%;
+  " />
+
+  <button id="login-btn" style="
+    width:100%; padding:11px; background:#ef4444; color:#fff;
+    border:none; border-radius:9px; font-size:14px; font-weight:700; cursor:pointer;
+  ">Sign In</button>
+
+  <div style="display:flex; gap:12px; width:100%; justify-content:center; margin-top:-4px;">
+    <button id="signup-btn" style="
+      background:transparent; border:none; color:#666; font-size:12px; cursor:pointer; padding:4px;
+    ">Create account</button>
+    <span style="color:#333; font-size:12px; line-height:1.8;">·</span>
+    <button id="skip-login-btn" style="
+      background:transparent; border:none; color:#666; font-size:12px; cursor:pointer; padding:4px;
+    ">Continue without account</button>
+  </div>
+</div>
+
 <script src="picker.js"></script>
 </body>
 </html>

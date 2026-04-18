@@ -120,6 +120,60 @@ startBtn.addEventListener('click', async () => {
   });
 });
 
+// ── Login overlay ─────────────────────────────────────────────
+const loginOverlay = document.getElementById('login-overlay');
+const loginEmail   = document.getElementById('login-email');
+const loginPass    = document.getElementById('login-pass');
+const loginBtn     = document.getElementById('login-btn');
+const signupBtn    = document.getElementById('signup-btn');
+const skipBtn      = document.getElementById('skip-login-btn');
+const loginError   = document.getElementById('login-error');
+let loginIsSignup  = false;
+
+function showLoginError(msg) {
+  loginError.textContent = msg;
+  loginError.style.display = 'block';
+}
+
+async function doLogin(isSignup) {
+  const email = loginEmail.value.trim();
+  const pass  = loginPass.value;
+  if (!email || !pass) { showLoginError('Email and password required'); return; }
+  loginBtn.disabled = true;
+  loginBtn.textContent = isSignup ? 'Creating account…' : 'Signing in…';
+  loginError.style.display = 'none';
+  const res = await window.api.userLogin({ email, password: pass, isSignup });
+  loginBtn.disabled = false;
+  loginBtn.textContent = isSignup ? 'Create Account' : 'Sign In';
+  if (res.ok) {
+    loginOverlay.style.display = 'none';
+  } else {
+    showLoginError(res.error || 'Authentication failed');
+  }
+}
+
+loginBtn.addEventListener('click', () => doLogin(loginIsSignup));
+loginPass.addEventListener('keydown', e => { if (e.key === 'Enter') doLogin(loginIsSignup); });
+
+signupBtn.addEventListener('click', () => {
+  loginIsSignup = !loginIsSignup;
+  loginBtn.textContent  = loginIsSignup ? 'Create Account' : 'Sign In';
+  signupBtn.textContent = loginIsSignup ? 'Back to sign in' : 'Create account';
+  loginError.style.display = 'none';
+});
+
+skipBtn.addEventListener('click', () => {
+  loginOverlay.style.display = 'none';
+});
+
+// Check if already logged in — skip overlay
+(async () => {
+  try {
+    const session = await window.api.getUserSession();
+    if (session?.access_token) loginOverlay.style.display = 'none';
+  } catch {}
+})();
+
 // Init
 loadDevices();
 loadSources();

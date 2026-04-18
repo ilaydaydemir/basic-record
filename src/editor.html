@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Basic Record — Editor</title>
+<style>
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+:root {
+  --bg: #0d0d0d;
+  --panel: #141414;
+  --border: #1e1e1e;
+  --accent: #ef4444;
+  --text: #e0e0e0;
+  --muted: #555;
+}
+html, body { width:100%; height:100vh; background:var(--bg); color:var(--text); overflow:hidden;
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; -webkit-app-region:drag; }
+
+/* ── Layout ── */
+.app { display:flex; flex-direction:column; height:100vh; -webkit-app-region:no-drag; }
+.titlebar { height:40px; flex-shrink:0; display:flex; align-items:center; padding:0 16px 0 80px;
+  gap:10px; border-bottom:1px solid var(--border); -webkit-app-region:drag; }
+.titlebar-title { font-size:13px; font-weight:600; color:var(--muted); -webkit-app-region:no-drag; }
+.titlebar-actions { margin-left:auto; display:flex; gap:8px; -webkit-app-region:no-drag; }
+
+.main { flex:1; display:flex; overflow:hidden; }
+
+/* ── Preview ── */
+.preview-wrap { flex:1; display:flex; flex-direction:column; min-width:0; }
+.preview-area { flex:1; background:#000; display:flex; align-items:center; justify-content:center; position:relative; overflow:hidden; }
+.preview-area video { max-width:100%; max-height:100%; display:block; pointer-events:none; }
+.preview-canvas { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
+.preview-canvas.drawing { pointer-events:all; cursor:crosshair; }
+
+/* Crop overlay */
+.crop-overlay { position:absolute; inset:0; pointer-events:none; }
+.crop-overlay.active { pointer-events:all; cursor:crosshair; }
+.crop-mask { position:absolute; background:rgba(0,0,0,0.55); }
+.crop-box { position:absolute; border:2px solid var(--accent); }
+.crop-handle { position:absolute; width:10px; height:10px; background:var(--accent); border-radius:2px; }
+
+/* Time indicator */
+.time-indicator { position:absolute; top:10px; right:12px; background:rgba(0,0,0,0.7);
+  color:#fff; font-size:12px; font-weight:600; padding:3px 8px; border-radius:6px;
+  font-variant-numeric:tabular-nums; pointer-events:none; }
+
+/* ── Tools sidebar ── */
+.sidebar { width:240px; flex-shrink:0; background:var(--panel); border-left:1px solid var(--border);
+  display:flex; flex-direction:column; gap:0; }
+.sidebar-tabs { display:flex; border-bottom:1px solid var(--border); flex-shrink:0; }
+.sidebar-tab { flex:1; padding:9px 4px; font-size:11px; font-weight:600; background:none;
+  border:none; color:var(--muted); cursor:pointer; transition:all 0.15s; border-bottom:2px solid transparent; }
+.sidebar-tab.active { color:var(--text); border-bottom-color:var(--accent); }
+.sidebar-tab-content { display:none; flex:1; flex-direction:column; overflow-y:auto; }
+.sidebar-tab-content.active { display:flex; }
+.sidebar-section { padding:12px 12px; border-bottom:1px solid var(--border); display:flex; flex-direction:column; gap:8px; flex-shrink:0; }
+.sidebar-label { font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:0.06em; }
+
+/* ── Subtitle tab ── */
+.sub-swatch-row { display:flex; gap:5px; flex-wrap:wrap; }
+.sub-swatch { width:22px; height:22px; border-radius:6px; cursor:pointer;
+  border:2px solid transparent; transition:border-color 0.15s;
+  display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:700; }
+.sub-swatch.active { border-color:#fff !important; }
+.sub-gen-btn { width:100%; padding:8px; background:var(--accent); color:#fff;
+  border:none; border-radius:7px; font-size:12px; font-weight:600; cursor:pointer; }
+.sub-gen-btn:disabled { background:#2a2a2a; color:#555; cursor:not-allowed; }
+.sub-status { font-size:11px; color:var(--muted); }
+.sub-pbar { height:3px; background:#222; border-radius:2px; overflow:hidden; margin-top:4px; }
+.sub-pbar-fill { height:100%; background:var(--accent); border-radius:2px; transition:width 0.3s; }
+.subtitle-segments { flex:1; overflow-y:auto; display:flex; flex-direction:column;
+  gap:3px; padding:8px; }
+.sub-seg { background:#1a1a1a; border:1px solid var(--border); border-radius:7px;
+  padding:7px 8px; display:flex; flex-direction:column; gap:5px; transition:border-color 0.15s; }
+.sub-seg.playing { border-color:#60a5fa; background:rgba(96,165,250,0.06); }
+.sub-seg.cut { opacity:0.45; border-color:rgba(239,68,68,0.35); background:rgba(239,68,68,0.04); }
+.sub-seg-header { display:flex; align-items:center; gap:6px; }
+.sub-seg-time { font-size:10px; color:#60a5fa; font-variant-numeric:tabular-nums; cursor:pointer; }
+.sub-seg-time:hover { color:#93c5fd; }
+.sub-cut-btn { margin-left:auto; background:none; border:none; color:#444; cursor:pointer; font-size:12px; padding:1px 4px; border-radius:4px; }
+.sub-cut-btn:hover { background:#2a2a2a; color:#ef4444; }
+.sub-seg.cut .sub-cut-btn { color:#ef4444; }
+.sub-words { display:flex; flex-wrap:wrap; gap:2px 3px; font-size:11px; color:#bbb; line-height:1.6; }
+.sub-word { cursor:pointer; padding:1px 2px; border-radius:3px; transition:background 0.1s; user-select:none; }
+.sub-word:hover { background:rgba(255,255,255,0.1); color:#fff; }
+.sub-word.sel { background:rgba(96,165,250,0.35); color:#fff; border-radius:3px; }
+.sub-word.wcut { text-decoration:line-through; color:#ef4444; opacity:0.55; cursor:default; }
+.sub-seg.cut .sub-words { text-decoration:line-through; color:#555; }
+.sub-cut-float { display:none; position:sticky; bottom:0; padding:8px; z-index:20;
+  background:rgba(10,10,10,0.97); border-top:1px solid #ef4444; flex-shrink:0; }
+.sub-cut-float-btn { width:100%; padding:8px; background:#ef4444; color:#fff; border:none;
+  border-radius:7px; font-size:12px; font-weight:700; cursor:pointer; }
+.sub-cut-float-btn:hover { background:#dc2626; }
+.tool-row { display:flex; gap:6px; }
+.tool-btn {
+  flex:1; padding:7px 4px; border:1px solid var(--border); border-radius:7px;
+  background:transparent; color:var(--muted); font-size:11px; font-weight:600;
+  cursor:pointer; transition:all 0.15s; text-align:center;
+}
+.tool-btn:hover { border-color:#333; color:var(--text); }
+.tool-btn.active { background:var(--accent); color:#fff; border-color:var(--accent); }
+.tool-btn.active-blue { background:#2563eb; color:#fff; border-color:#2563eb; }
+
+/* Color picker row */
+.color-row { display:flex; gap:5px; flex-wrap:wrap; }
+.color-swatch { width:22px; height:22px; border-radius:50%; cursor:pointer; border:2px solid transparent; transition:border-color 0.15s; }
+.color-swatch.active { border-color:#fff; }
+
+/* Brush size */
+input[type=range] { width:100%; accent-color:var(--accent); height:4px; }
+.range-row { display:flex; align-items:center; gap:8px; }
+.range-val { font-size:11px; color:var(--muted); min-width:22px; text-align:right; }
+
+/* Annotation list */
+.ann-list { display:flex; flex-direction:column; gap:4px; max-height:160px; overflow-y:auto; }
+.ann-item { display:flex; align-items:center; gap:4px; padding:5px 8px; background:#1a1a1a;
+  border-radius:6px; font-size:11px; color:#aaa; border:1px solid var(--border); flex-wrap:wrap; }
+.ann-item-time { color:#60a5fa; min-width:36px; cursor:pointer; }
+.ann-item-time:hover { color:#93c5fd; text-decoration:underline; }
+.ann-arrow { color:var(--muted); }
+.ann-item-end { color:#4ade80; cursor:pointer; min-width:36px; }
+.ann-item-end:hover { color:#86efac; text-decoration:underline; }
+.ann-item-type { flex:1; color:var(--muted); }
+.ann-del { background:none; border:none; color:#444; cursor:pointer; font-size:13px; padding:0 2px; }
+.ann-del:hover { color:#ef4444; }
+
+/* ── Timeline ── */
+.timeline-wrap { height:130px; flex-shrink:0; background:var(--panel);
+  border-top:1px solid var(--border); display:flex; flex-direction:column; -webkit-app-region:no-drag; }
+.timeline-controls { height:36px; display:flex; align-items:center; gap:8px; padding:0 12px;
+  border-bottom:1px solid var(--border); flex-shrink:0; }
+.btn-sm {
+  padding:4px 10px; border:1px solid var(--border); border-radius:6px;
+  background:transparent; color:#aaa; font-size:11px; font-weight:600;
+  cursor:pointer; transition:all 0.15s;
+}
+.btn-sm:hover { border-color:#333; color:var(--text); }
+/* Speed popup */
+#speed-popup {
+  position:fixed; background:#1e1e1e; border:1px solid #2a2a2a;
+  border-radius:14px; padding:6px 0 8px; z-index:3000; min-width:190px;
+  box-shadow:0 8px 32px rgba(0,0,0,0.75); display:none;
+}
+.speed-popup-header { padding:9px 16px 7px; font-size:12px; font-weight:700; color:#888;
+  display:flex; justify-content:space-between; align-items:center;
+  border-bottom:1px solid #2a2a2a; }
+.speed-opt { padding:10px 20px; font-size:14px; color:#bbb; cursor:pointer;
+  border-radius:8px; margin:1px 6px; transition:background 0.1s; }
+.speed-opt:hover { background:#2a2a2a; color:#fff; }
+.speed-opt.active { background:#2a2a2a; color:#fff; font-weight:700; }
+
+/* Export platform modal */
+#export-modal { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.75);
+  z-index:2000; align-items:center; justify-content:center; }
+.export-modal-box { background:#141414; border:1px solid #2a2a2a; border-radius:16px;
+  width:480px; max-width:95vw; display:flex; flex-direction:column; gap:0;
+  box-shadow:0 20px 60px rgba(0,0,0,0.7); overflow:hidden; }
+.export-modal-title { padding:16px 20px 12px; font-size:14px; font-weight:700;
+  border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+.export-modal-close { background:none; border:none; color:#555; cursor:pointer; font-size:18px;
+  padding:0 4px; line-height:1; }
+.export-modal-close:hover { color:#fff; }
+.platform-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; padding:16px; }
+.platform-card { background:#1a1a1a; border:1px solid #2a2a2a; border-radius:10px;
+  padding:14px 12px; cursor:pointer; transition:all 0.15s; text-align:center; }
+.platform-card:hover { border-color:var(--accent); background:rgba(239,68,68,0.06); }
+.platform-card-icon { font-size:22px; margin-bottom:5px; }
+.platform-card-name { font-size:12px; font-weight:700; color:var(--text); }
+.platform-card-res { font-size:9px; color:var(--muted); margin-top:2px; letter-spacing:.04em; }
+.cut-chip { display:inline-flex; align-items:center; gap:4px; padding:2px 6px 2px 8px;
+  background:rgba(239,68,68,0.15); border:1px solid rgba(239,68,68,0.4); border-radius:20px;
+  font-size:10px; color:#f87171; font-variant-numeric:tabular-nums; cursor:default; }
+.cut-chip button { background:none; border:none; color:#f87171; cursor:pointer; font-size:11px;
+  padding:0; line-height:1; opacity:0.7; }
+.cut-chip button:hover { opacity:1; }
+.btn-sm.red { background:var(--accent); border-color:var(--accent); color:#fff; }
+.btn-sm.red:hover { background:#dc2626; }
+.time-display { font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; margin-left:auto; }
+
+.timeline-canvas-wrap { flex:1; position:relative; overflow:hidden; }
+canvas#timeline { width:100%; height:100%; cursor:pointer; display:block; }
+
+/* ── Export bar ── */
+.export-bar { height:44px; flex-shrink:0; display:flex; align-items:center; gap:10px;
+  padding:0 16px; border-top:1px solid var(--border); background:var(--panel); -webkit-app-region:no-drag; }
+.btn-export {
+  padding:8px 20px; background:var(--accent); color:#fff; border:none;
+  border-radius:8px; font-size:13px; font-weight:700; cursor:pointer; transition:background 0.15s;
+}
+.btn-export:hover { background:#dc2626; }
+.btn-export:disabled { background:#3a3a3a; color:#666; cursor:not-allowed; }
+.btn-back { padding:8px 14px; background:#1a1a1a; border:1px solid var(--border);
+  border-radius:8px; color:#888; font-size:12px; font-weight:600; cursor:pointer; transition:all 0.15s; }
+.btn-back:hover { border-color:#333; color:var(--text); }
+.export-status { font-size:12px; color:var(--muted); margin-left:auto; }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Titlebar -->
+  <div class="titlebar">
+    <span class="titlebar-title">Basic Record — Editor</span>
+    <div class="titlebar-actions">
+      <button class="btn-sm" id="undo-btn">↩ Undo</button>
+      <button class="btn-sm" id="redo-btn">↪ Redo</button>
+    </div>
+  </div>
+
+  <div class="main">
+
+    <!-- Preview + canvas -->
+    <div class="preview-wrap">
+      <div class="preview-area" id="preview-area">
+        <video id="video" preload="auto"></video>
+        <canvas id="preview-canvas" class="preview-canvas"></canvas>
+        <div class="crop-overlay" id="crop-overlay"></div>
+        <div class="time-indicator" id="time-indicator">0:00.0 / 0:00.0</div>
+      </div>
+
+      <!-- Timeline -->
+      <div class="timeline-wrap">
+        <div class="timeline-controls">
+          <button class="btn-sm" id="play-btn">▶ Play</button>
+          <button class="btn-sm" id="mark-in-btn">[ In</button>
+          <button class="btn-sm" id="mark-out-btn">Out ]</button>
+          <button class="btn-sm" id="cut-btn">✂ Cut selection</button>
+          <button class="btn-sm" id="reset-trim-btn">Reset</button>
+          <div style="margin-left:8px;position:relative;">
+            <button class="btn-sm" id="speed-btn" title="Playback speed">1×</button>
+          </div>
+          <span class="time-display" id="time-display">0:00.0 / 0:00.0</span>
+        </div>
+        <div class="timeline-canvas-wrap">
+          <canvas id="timeline"></canvas>
+        </div>
+        <!-- Cuts chips list -->
+        <div id="cuts-bar" style="display:none; padding:4px 10px 6px; border-top:1px solid var(--border);
+          display:flex; flex-wrap:wrap; gap:4px; align-items:center; min-height:28px;">
+          <span style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.05em;margin-right:2px;">Cuts:</span>
+          <div id="cuts-chips" style="display:flex;flex-wrap:wrap;gap:4px;"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Sidebar tools -->
+    <div class="sidebar">
+      <div class="sidebar-tabs">
+        <button class="sidebar-tab active" id="tab-edit-btn">Edit</button>
+        <button class="sidebar-tab" id="tab-sub-btn">Subtitles</button>
+      </div>
+
+      <!-- ── Edit tab ── -->
+      <div class="sidebar-tab-content active" id="tab-edit">
+
+        <!-- Draw tools -->
+        <div class="sidebar-section">
+          <div class="sidebar-label">Draw on video</div>
+          <div class="tool-row">
+            <button class="tool-btn" id="tool-none">Off</button>
+            <button class="tool-btn" id="tool-pen">✏ Pen</button>
+            <button class="tool-btn" id="tool-blur">⬜ Blur</button>
+          </div>
+          <div class="tool-row">
+            <button class="tool-btn" id="tool-arrow">↗ Arrow</button>
+            <button class="tool-btn" id="tool-rect">▭ Rect</button>
+            <button class="tool-btn" id="tool-text">T Text</button>
+          </div>
+          <div class="sidebar-label" style="margin-top:4px;">Color</div>
+          <div class="color-row" id="color-row">
+            <div class="color-swatch active" style="background:#ef4444" data-color="#ef4444"></div>
+            <div class="color-swatch" style="background:#facc15" data-color="#facc15"></div>
+            <div class="color-swatch" style="background:#4ade80" data-color="#4ade80"></div>
+            <div class="color-swatch" style="background:#60a5fa" data-color="#60a5fa"></div>
+            <div class="color-swatch" style="background:#e879f9" data-color="#e879f9"></div>
+            <div class="color-swatch" style="background:#ffffff" data-color="#ffffff"></div>
+          </div>
+          <div class="range-row">
+            <span class="sidebar-label">Size</span>
+            <input type="range" id="brush-size" min="2" max="40" value="5">
+            <span class="range-val" id="brush-val">5</span>
+          </div>
+          <div class="sidebar-label" style="margin-top:2px;">Start at current time. Click green end time to shorten.</div>
+          <!-- Text input (visible only when text tool active) -->
+          <div id="text-input-wrap" style="display:none; flex-direction:column; gap:6px; margin-top:4px;">
+            <div class="sidebar-label">Text to add</div>
+            <input id="sidebar-text-input" type="text" placeholder="Type text, then click video…"
+              style="background:#1a1a1a; color:#fff; border:1px solid #333; border-radius:6px;
+              padding:7px 10px; font-size:13px; outline:none; width:100%;">
+            <div style="font-size:10px; color:var(--muted);">Click on video to place</div>
+          </div>
+        </div>
+
+        <!-- Crop -->
+        <div class="sidebar-section">
+          <div class="sidebar-label">Crop</div>
+          <div class="tool-row">
+            <button class="tool-btn" id="crop-btn">✂ Set Crop</button>
+            <button class="tool-btn" id="crop-clear-btn">Clear</button>
+          </div>
+          <div id="crop-info" style="font-size:10px;color:var(--muted);">No crop set</div>
+        </div>
+
+        <!-- Annotations list -->
+        <div class="sidebar-section" style="flex:1;overflow-y:auto;">
+          <div class="sidebar-label">Annotations (<span id="ann-count">0</span>)</div>
+          <div class="ann-list" id="ann-list"></div>
+        </div>
+
+      </div><!-- end tab-edit -->
+
+      <!-- ── Subtitles tab ── -->
+      <div class="sidebar-tab-content" id="tab-sub">
+
+        <!-- Style controls -->
+        <div class="sidebar-section">
+          <div class="sidebar-label">Subtitle background</div>
+          <div class="sub-swatch-row" id="sub-bg-row"></div>
+          <div class="sidebar-label" style="margin-top:6px;">Text color</div>
+          <div class="sub-swatch-row" id="sub-txt-row"></div>
+          <div class="range-row" style="margin-top:4px;">
+            <span class="sidebar-label">Size</span>
+            <input type="range" id="sub-size" min="14" max="54" value="22">
+            <span class="range-val" id="sub-size-val">22</span>
+          </div>
+        </div>
+
+        <!-- Generate -->
+        <div class="sidebar-section">
+          <button class="sub-gen-btn" id="sub-gen-btn">Generate Subtitles</button>
+          <button class="sub-gen-btn" id="sub-filler-btn" style="background:#7c3aed;margin-top:4px;display:none;">
+            ✂ Auto-remove fillers (em, uh…)
+          </button>
+          <div id="sub-status" class="sub-status"></div>
+          <div class="sub-pbar" id="sub-pbar" style="display:none;">
+            <div class="sub-pbar-fill" id="sub-pbar-fill" style="width:0%"></div>
+          </div>
+        </div>
+
+        <!-- Segment list -->
+        <div class="subtitle-segments" id="subtitle-segments"></div>
+
+        <!-- Floating cut bar (appears on word selection) -->
+        <div class="sub-cut-float" id="sub-cut-float">
+          <button class="sub-cut-float-btn" id="sub-cut-float-btn">✂ Cut selected words</button>
+        </div>
+
+      </div><!-- end tab-sub -->
+
+    </div>
+  </div>
+
+  <!-- Speed popup (fixed, shown near speed-btn) -->
+  <div id="speed-popup">
+    <div class="speed-popup-header">
+      <span>Playback Speed</span>
+      <span id="speed-popup-s" style="background:#2a2a2a;padding:2px 7px;border-radius:5px;font-size:11px;color:#e0e0e0;">S</span>
+    </div>
+    <div class="speed-opt" data-speed="0.8">0.8×</div>
+    <div class="speed-opt active" data-speed="1">1×</div>
+    <div class="speed-opt" data-speed="1.2">1.2×</div>
+    <div class="speed-opt" data-speed="1.5">1.5×</div>
+    <div class="speed-opt" data-speed="1.7">1.7×</div>
+    <div class="speed-opt" data-speed="2">2×</div>
+    <div class="speed-opt" data-speed="2.5">2.5×</div>
+  </div>
+
+  <!-- Export platform modal -->
+  <div id="export-modal">
+    <div class="export-modal-box">
+      <div class="export-modal-title">
+        <span>Export for…</span>
+        <button class="export-modal-close" id="export-modal-close">✕</button>
+      </div>
+      <div class="platform-grid" id="platform-grid"></div>
+      <div id="export-modal-status" style="padding:8px 16px 14px;font-size:12px;color:var(--muted);min-height:28px;"></div>
+    </div>
+  </div>
+
+  <!-- Upload to Web modal -->
+  <div id="upload-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);
+    z-index:2000;align-items:center;justify-content:center;">
+    <div style="background:#1a1a1a;border:1px solid #2a2a2a;border-radius:14px;
+      padding:24px;width:360px;display:flex;flex-direction:column;gap:14px;
+      box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+      <div style="font-size:14px;font-weight:700;">↑ Upload to Web</div>
+      <div id="upload-user-info" style="display:none;font-size:11px;color:#888;"></div>
+
+      <div id="upload-login-wrap" style="display:flex;flex-direction:column;gap:8px;">
+        <input id="upload-email" type="email" placeholder="Email"
+          style="background:#111;color:#fff;border:1px solid #333;border-radius:7px;
+          padding:8px 10px;font-size:13px;outline:none;">
+        <input id="upload-password" type="password" placeholder="Password"
+          style="background:#111;color:#fff;border:1px solid #333;border-radius:7px;
+          padding:8px 10px;font-size:13px;outline:none;">
+      </div>
+
+      <div id="upload-title-wrap" style="display:flex;flex-direction:column;gap:6px;">
+        <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:.06em;">Title</div>
+        <input id="upload-title" type="text" placeholder="My Recording"
+          style="background:#111;color:#fff;border:1px solid #333;border-radius:7px;
+          padding:8px 10px;font-size:13px;outline:none;">
+      </div>
+
+      <div id="upload-progress-wrap" style="display:none;flex-direction:column;gap:6px;">
+        <div id="upload-status" style="font-size:12px;color:#aaa;"></div>
+        <div class="sub-pbar"><div class="sub-pbar-fill" id="upload-pbar-fill" style="width:0%"></div></div>
+      </div>
+
+      <div id="upload-success-wrap" style="display:none;flex-direction:column;gap:8px;">
+        <div style="font-size:13px;color:#4ade80;">✓ Uploaded successfully!</div>
+        <button id="upload-open-btn" style="background:#2563eb;color:#fff;border:none;
+          border-radius:7px;padding:9px;font-size:12px;font-weight:600;cursor:pointer;">
+          Open in Browser ↗
+        </button>
+      </div>
+
+      <div style="display:flex;gap:8px;margin-top:4px;">
+        <button id="upload-go-btn" style="flex:1;padding:9px;background:#ef4444;color:#fff;
+          border:none;border-radius:7px;font-size:13px;font-weight:700;cursor:pointer;">
+          Upload
+        </button>
+        <button id="upload-cancel-btn" style="padding:9px 16px;background:#222;color:#888;
+          border:1px solid #333;border-radius:7px;font-size:12px;cursor:pointer;">
+          Cancel
+        </button>
+      </div>
+      <div id="upload-err" style="font-size:11px;color:#ef4444;display:none;"></div>
+    </div>
+  </div>
+
+  <!-- Export bar -->
+  <div class="export-bar">
+    <button class="btn-back" id="back-btn">← New Recording</button>
+    <button class="btn-export" id="export-btn">Export for…</button>
+    <button class="btn-export" id="upload-web-btn" style="background:#2563eb;">↑ Upload to Web</button>
+    <span class="export-status" id="export-status"></span>
+  </div>
+
+</div>
+<script src="editor.js"></script>
+</body>
+</html>

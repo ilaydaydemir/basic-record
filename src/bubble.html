@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body {
+  width: 164px;
+  background: transparent;
+  overflow: hidden;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  position: relative;
+}
+
+/* ── Camera section ── */
+.cam-section {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  overflow: hidden;
+  transition: max-height 0.3s ease, opacity 0.3s ease;
+  max-height: 300px;
+  position: relative;
+}
+.cam-section.hidden { max-height: 0; opacity: 0; }
+
+.bubble {
+  width: 140px; height: 140px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: #1a1a1a;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.7), 0 0 0 3px rgba(255,255,255,0.9);
+  cursor: grab;
+  flex-shrink: 0;
+  margin: 12px 0 8px;
+  transition: width 0.2s, height 0.2s;
+}
+.bubble:active { cursor: grabbing; }
+.bubble video {
+  width: 100%; height: 100%;
+  object-fit: cover;
+  transform: scaleX(-1);
+  display: block;
+}
+.no-cam {
+  width: 100%; height: 100%;
+  display: flex; align-items: center; justify-content: center;
+  color: #444; font-size: 36px;
+}
+
+/* Size controls under bubble */
+.size-row {
+  display: flex; gap: 4px; margin-bottom: 4px;
+}
+.btn-size {
+  width: 26px; height: 18px;
+  background: rgba(0,0,0,0.5); border: 1px solid #2a2a2a;
+  border-radius: 5px; color: #666; font-size: 10px; font-weight: 700;
+  cursor: pointer; transition: all 0.15s;
+  display: flex; align-items: center; justify-content: center;
+}
+.btn-size:hover { border-color: #444; color: #ccc; }
+.btn-size.active { border-color: #666; color: #fff; }
+
+/* ── Toolbar ── */
+.toolbar {
+  width: 148px;
+  background: rgba(12, 12, 12, 0.96);
+  border-radius: 16px;
+  padding: 10px 10px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  box-shadow: 0 4px 24px rgba(0,0,0,0.7);
+  margin-bottom: 10px;
+}
+
+.timer-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  justify-content: center;
+}
+.rec-dot {
+  width: 7px; height: 7px;
+  background: #ef4444; border-radius: 50%;
+  animation: blink 1s infinite;
+  flex-shrink: 0;
+}
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.15} }
+@keyframes jump {
+  0%   { transform: translateY(0); }
+  25%  { transform: translateY(-18px); }
+  50%  { transform: translateY(0); }
+  70%  { transform: translateY(-8px); }
+  100% { transform: translateY(0); }
+}
+.bubble.jumping { animation: jump 0.5s ease; }
+.timer { font-size: 17px; font-weight: 700; color: #fff; font-variant-numeric: tabular-nums; }
+
+/* Source name indicator */
+.source-name {
+  font-size: 9px; color: #555; text-align: center; width: 100%;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  transition: color 0.3s;
+}
+.source-name.flash { color: #4ade80; }
+
+.cam-toggle-row { width: 100%; display: flex; align-items: center; justify-content: center; }
+.btn-cam-toggle {
+  width: 100%; padding: 5px 0;
+  background: #1c1c1c; border: 1px solid #2a2a2a;
+  border-radius: 8px; color: #666; font-size: 11px; font-weight: 600;
+  cursor: pointer; transition: all 0.15s;
+  display: flex; align-items: center; justify-content: center; gap: 5px;
+}
+.btn-cam-toggle:hover { border-color: #3a3a3a; color: #ccc; }
+.btn-cam-toggle.cam-on { border-color: #3a3a3a; color: #ccc; }
+
+.action-row { display: flex; gap: 6px; width: 100%; }
+.btn {
+  flex: 1; height: 30px;
+  border: none; border-radius: 8px;
+  font-size: 11px; font-weight: 600;
+  cursor: pointer; transition: all 0.15s;
+  display: flex; align-items: center; justify-content: center;
+}
+.btn-stop    { background: #ef4444; color: #fff; }
+.btn-stop:hover { background: #dc2626; }
+.btn-stop:disabled { background: #3a3a3a; color: #555; cursor: not-allowed; }
+.btn-draw    { background: #1c1c1c; color: #888; border: 1px solid #2a2a2a; }
+.btn-draw:hover { border-color: #3a3a3a; color: #fff; }
+.btn-draw.active { background: #2563eb; color: #fff; border-color: #2563eb; }
+
+.btn-switch {
+  width: 100%; height: 26px;
+  background: #1c1c1c; border: 1px solid #2a2a2a;
+  border-radius: 7px; color: #777; font-size: 10px; font-weight: 600;
+  cursor: pointer; transition: all 0.15s;
+}
+.btn-switch:hover { border-color: #3a3a3a; color: #ccc; }
+.btn-switch.switching { border-color: #4ade80; color: #4ade80; }
+
+.btn-discard {
+  width: 100%; height: 26px;
+  background: transparent; border: 1px solid #1e1e1e;
+  border-radius: 7px; color: #3a3a3a; font-size: 10px; font-weight: 500;
+  cursor: pointer; transition: all 0.15s;
+}
+.btn-discard:hover { border-color: #3a3a3a; color: #888; }
+
+.btn-flip {
+  width: 100%; height: 26px;
+  background: #1c1c1c; border: 1px solid #2a2a2a;
+  border-radius: 7px; color: #777; font-size: 10px; font-weight: 600;
+  cursor: pointer; transition: all 0.15s;
+}
+.btn-flip:hover { border-color: #3a3a3a; color: #ccc; }
+.btn-flip.flipped { border-color: #7c3aed; color: #a78bfa; }
+</style>
+</head>
+<body>
+
+<div class="panel" id="panel">
+  <!-- Camera -->
+  <div class="cam-section" id="cam-section">
+    <div class="bubble" id="bubble-drag">
+      <video id="cam-video" autoplay playsinline muted></video>
+      <div class="no-cam" id="no-cam" style="display:none;">📷</div>
+    </div>
+    <div class="size-row">
+      <button class="btn-size" data-size="80" title="Small">S</button>
+      <button class="btn-size active" data-size="140" title="Medium">M</button>
+      <button class="btn-size" data-size="200" title="Large">L</button>
+    </div>
+    <button class="btn-flip" id="flip-btn">↔ Flip Camera</button>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <div class="timer-row">
+      <div class="rec-dot"></div>
+      <span class="timer" id="timer">0:00</span>
+    </div>
+
+    <div class="source-name" id="source-name">● Recording screen</div>
+
+    <div class="cam-toggle-row">
+      <button class="btn-cam-toggle cam-on" id="cam-toggle">
+        <span id="cam-icon">📷</span>
+        <span id="cam-text">Hide Camera</span>
+      </button>
+    </div>
+
+    <div class="action-row">
+      <button class="btn btn-draw" id="draw-btn">✏️ Draw</button>
+      <button class="btn btn-stop" id="stop-btn">⏹ Stop</button>
+    </div>
+
+    <button class="btn-switch" id="switch-btn">⇄ Switch Source</button>
+    <button class="btn-discard" id="discard-btn">Discard recording</button>
+  </div>
+</div>
+
+<script src="bubble.js"></script>
+</body>
+</html>

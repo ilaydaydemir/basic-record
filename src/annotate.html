@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+html, body { width:100%; height:100%; background:transparent; overflow:hidden; }
+canvas { position:fixed; top:0; left:0; width:100%; height:100%; cursor:crosshair; }
+
+/* Toolbar */
+.toolbar {
+  position:fixed; bottom:30px; left:50%; transform:translateX(-50%);
+  background:rgba(15,15,15,0.92); backdrop-filter:blur(8px);
+  border-radius:16px; padding:10px 14px;
+  display:flex; align-items:center; gap:10px;
+  box-shadow:0 8px 32px rgba(0,0,0,0.6);
+  border:1px solid rgba(255,255,255,0.08);
+  -webkit-app-region:no-drag;
+}
+.tool-btn {
+  width:36px; height:36px; border:none; border-radius:9px;
+  background:transparent; color:#aaa; font-size:16px;
+  cursor:pointer; display:flex; align-items:center; justify-content:center;
+  transition:all 0.15s;
+}
+.tool-btn:hover { background:rgba(255,255,255,0.1); color:#fff; }
+.tool-btn.active { background:#ef4444; color:#fff; }
+.divider { width:1px; height:24px; background:rgba(255,255,255,0.1); }
+
+/* Color swatches */
+.colors { display:flex; gap:6px; }
+.swatch {
+  width:22px; height:22px; border-radius:50%; cursor:pointer;
+  border:2px solid transparent; transition:border-color 0.15s;
+}
+.swatch.active { border-color:#fff; }
+
+/* Size slider */
+input[type=range] {
+  width:70px; accent-color:#ef4444;
+}
+
+/* Undo / Clear */
+.btn-small {
+  padding:4px 10px; border:none; border-radius:7px;
+  background:#1a1a1a; color:#888; font-size:11px; font-weight:600;
+  cursor:pointer; transition:all 0.15s;
+}
+.btn-small:hover { background:#2a2a2a; color:#ccc; }
+
+.btn-close {
+  padding:4px 10px; border:none; border-radius:7px;
+  background:#ef4444; color:#fff; font-size:11px; font-weight:600;
+  cursor:pointer;
+}
+.btn-close:hover { background:#dc2626; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+
+<div class="toolbar">
+  <!-- Tools -->
+  <button class="tool-btn active" id="tool-pen"   title="Pen">✏️</button>
+  <button class="tool-btn"        id="tool-arrow" title="Arrow">↗</button>
+  <button class="tool-btn"        id="tool-rect"  title="Rectangle">▭</button>
+  <button class="tool-btn"        id="tool-blur"  title="Blur">◫</button>
+  <div class="divider"></div>
+
+  <!-- Colors -->
+  <div class="colors">
+    <div class="swatch active" style="background:#ef4444" data-color="#ef4444"></div>
+    <div class="swatch"        style="background:#facc15" data-color="#facc15"></div>
+    <div class="swatch"        style="background:#4ade80" data-color="#4ade80"></div>
+    <div class="swatch"        style="background:#60a5fa" data-color="#60a5fa"></div>
+    <div class="swatch"        style="background:#ffffff" data-color="#ffffff"></div>
+  </div>
+  <div class="divider"></div>
+
+  <!-- Size -->
+  <input type="range" id="size-slider" min="2" max="24" value="4">
+  <div class="divider"></div>
+
+  <!-- Actions -->
+  <button class="btn-small" id="undo-btn">Undo</button>
+  <button class="btn-small" id="clear-btn">Clear</button>
+  <button class="btn-close" id="close-btn">Done</button>
+</div>
+
+<script src="annotate.js"></script>
+</body>
+</html>

@@ -29,8 +29,8 @@ html, body { width:100%; height:100vh; background:var(--bg); color:var(--text); 
 .preview-wrap { flex:1; display:flex; flex-direction:column; min-width:0; }
 .preview-area { flex:1; background:#000; display:flex; align-items:center; justify-content:center; position:relative; overflow:hidden; }
 .preview-area video { max-width:100%; max-height:100%; display:block; pointer-events:none; }
-.preview-canvas { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:none; }
-.preview-canvas.drawing { pointer-events:all; cursor:crosshair; }
+.preview-canvas { position:absolute; top:0; left:0; width:100%; height:100%; pointer-events:all; cursor:default; }
+.preview-canvas.drawing { cursor:crosshair; }
 
 /* Crop overlay */
 .crop-overlay { position:absolute; inset:0; pointer-events:none; }
@@ -80,6 +80,11 @@ html, body { width:100%; height:100vh; background:var(--bg); color:var(--text); 
 .sub-cut-btn { margin-left:auto; background:none; border:none; color:#444; cursor:pointer; font-size:12px; padding:1px 4px; border-radius:4px; }
 .sub-cut-btn:hover { background:#2a2a2a; color:#ef4444; }
 .sub-seg.cut .sub-cut-btn { color:#ef4444; }
+.sub-edit-btn { background:none; border:none; color:#444; cursor:pointer; font-size:12px; padding:1px 5px; border-radius:4px; }
+.sub-edit-btn:hover { background:#2a2a2a; color:#60a5fa; }
+.sub-edit-area { width:100%; background:#111; color:#e0e0e0; border:1px solid #60a5fa;
+  border-radius:6px; padding:6px 8px; font-size:12px; font-family:inherit;
+  resize:none; outline:none; line-height:1.5; overflow:hidden; }
 .sub-words { display:flex; flex-wrap:wrap; gap:2px 3px; font-size:11px; color:#bbb; line-height:1.6; }
 .sub-word { cursor:pointer; padding:1px 2px; border-radius:3px; transition:background 0.1s; user-select:none; }
 .sub-word:hover { background:rgba(255,255,255,0.1); color:#fff; }
@@ -229,6 +234,7 @@ canvas#timeline { width:100%; height:100%; cursor:pointer; display:block; }
           <div style="margin-left:8px;position:relative;">
             <button class="btn-sm" id="speed-btn" title="Playback speed">1×</button>
           </div>
+          <button class="btn-sm" id="select-mode-btn" title="Drag on timeline to select a range">⬚ Select</button>
           <span class="time-display" id="time-display">0:00.0 / 0:00.0</span>
         </div>
         <div class="timeline-canvas-wrap">
@@ -327,6 +333,24 @@ canvas#timeline { width:100%; height:100%; cursor:pointer; display:block; }
 
         <!-- Generate -->
         <div class="sidebar-section">
+          <div class="sidebar-label">Language</div>
+          <select id="sub-lang" style="width:100%;background:#1a1a1a;color:#e0e0e0;
+            border:1px solid #2a2a2a;border-radius:7px;padding:6px 8px;
+            font-size:12px;outline:none;cursor:pointer;">
+            <option value="">Auto-detect</option>
+            <option value="turkish" selected>Turkish 🇹🇷</option>
+            <option value="english">English 🇺🇸</option>
+            <option value="spanish">Spanish 🇪🇸</option>
+            <option value="french">French 🇫🇷</option>
+            <option value="german">German 🇩🇪</option>
+            <option value="arabic">Arabic 🇸🇦</option>
+            <option value="portuguese">Portuguese 🇧🇷</option>
+            <option value="italian">Italian 🇮🇹</option>
+            <option value="russian">Russian 🇷🇺</option>
+            <option value="japanese">Japanese 🇯🇵</option>
+            <option value="korean">Korean 🇰🇷</option>
+            <option value="chinese">Chinese 🇨🇳</option>
+          </select>
           <button class="sub-gen-btn" id="sub-gen-btn">Generate Subtitles</button>
           <button class="sub-gen-btn" id="sub-filler-btn" style="background:#7c3aed;margin-top:4px;display:none;">
             ✂ Auto-remove fillers (em, uh…)

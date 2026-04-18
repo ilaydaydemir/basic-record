@@ -37,8 +37,10 @@ function createBubble(cameraDeviceId) {
   });
   bubbleWin.loadFile('src/bubble.html');
   bubbleWin.setAlwaysOnTop(true, 'screen-saver');
+  bubbleWin.setContentProtection(true); // hide from screen recording
   bubbleWin.webContents.once('did-finish-load', () => {
     bubbleWin.webContents.send('init', { cameraDeviceId });
+    setTimeout(sendCamPosition, 500); // send initial position after recorder loads
   });
   bubbleWin.on('closed', () => { bubbleWin = null; });
 }
@@ -121,6 +123,7 @@ ipcMain.handle('start-recording', (_, opts) => {
 
 // ── IPC: stop / discard ────────────────────────────────────
 ipcMain.on('stop-recording',    () => recorderWin?.webContents.send('stop'));
+ipcMain.on('pause-recording',   (_, v) => recorderWin?.webContents.send('pause', v));
 ipcMain.on('discard-recording', () => recorderWin?.webContents.send('discard'));
 
 // ── IPC: save temp file → open editor ─────────────────────
@@ -201,10 +204,25 @@ ipcMain.on('editor-done', () => {
 });
 
 // ── IPC: bubble drag & resize ─────────────────────────────
+function sendCamPosition() {
+  if (!bubbleWin || !recorderWin) return;
+  const { bounds } = screen.getPrimaryDisplay();
+  const [bx, by] = bubbleWin.getPosition();
+  const [bw]     = bubbleWin.getSize();
+  // Camera circle center is ~bw/2 horizontally, ~(12 + bubbleSize/2) from top
+  const camCx = bx + bw / 2;
+  const camCy = by + 82; // approx center of 140px bubble
+  recorderWin.webContents.send('cam-position-xy', {
+    x: Math.max(0.05, Math.min(0.95, camCx / bounds.width)),
+    y: Math.max(0.05, Math.min(0.95, camCy / bounds.height)),
+  });
+}
+
 ipcMain.on('bubble-drag', (_, { dx, dy }) => {
   if (!bubbleWin) return;
   const [x, y] = bubbleWin.getPosition();
   bubbleWin.setPosition(x + dx, y + dy);
+  sendCamPosition();
 });
 ipcMain.on('resize-bubble', (_, { width, height }) => {
   if (!bubbleWin) return;
@@ -213,11 +231,16 @@ ipcMain.on('resize-bubble', (_, { width, height }) => {
   const h = Math.min(height, workAreaSize.height - 40);
   bubbleWin.setSize(width, h);
   bubbleWin.setPosition(x, Math.max(20, workAreaSize.height - h - 20));
+  sendCamPosition();
 });
 
 // ── IPC: timer ────────────────────────────────────────────
 ipcMain.on('timer-tick', (_, s) => bubbleWin?.webContents.send('timer-tick', s));
 ipcMain.on('flip-camera', (_, v) => recorderWin?.webContents.send('flip-camera', v));
+ipcMain.on('cam-position', (_, pos) => recorderWin?.webContents.send('cam-position', pos));
+ipcMain.on('cam-out-of-bounds', (_, v) => bubbleWin?.webContents.send('cam-out-of-bounds', v));
+ipcMain.on('cam-visible', (_, v) => recorderWin?.webContents.send('cam-visible', v));
+ipcMain.on('cam-size',    (_, r) => recorderWin?.webContents.send('cam-size', r));
 
 // ── IPC: source switcher ──────────────────────────────────
 ipcMain.on('open-source-switcher', () => {

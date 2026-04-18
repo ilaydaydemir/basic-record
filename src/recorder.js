@@ -13,9 +13,18 @@ let camVideo     = null;
 let rafId        = null;
 let region       = null;
 let annotationImg = null;
-let cameraFlipped = true; // mirror by default
+let cameraFlipped = true;
+let camPosition   = 'br'; // tl | tr | bl | br (fallback)
+let camXY         = null; // { x, y } normalized 0-1, overrides corner preset
+let camLastOutOfBounds = false;
 
+let camVisible   = true;
+let camSizeRatio = 0.18; // fraction of min(canvas.width, canvas.height)
 window.api.onFlipCamera(v => { cameraFlipped = v; });
+window.api.onCamPosition(pos => { camPosition = pos; camXY = null; });
+window.api.onCamPositionXY(pos => { camXY = pos; });
+window.api.onCamVisible(v => { camVisible = v; });
+window.api.onCamSize(r => { camSizeRatio = r; });
 
 // Receive annotation frames from annotate window (null = clear)
 window.api.onAnnotationFrame(dataUrl => {
@@ -34,39 +43,58 @@ function drawLoop() {
     }
 
     // ── Camera bubble overlay ─────────────────────────────
-    if (camVideo && camVideo.readyState >= 2) {
-      const size   = Math.round(Math.min(canvas.width, canvas.height) * 0.18);
+    if (camVisible && camVideo && camVideo.readyState >= 2) {
+      const size   = Math.round(Math.min(canvas.width, canvas.height) * camSizeRatio);
       const margin = Math.round(canvas.width * 0.02);
-      const cx     = canvas.width  - size - margin;
-      const cy     = canvas.height - size - margin;
-      const r      = size / 2;
-
-      // Center-crop camera to square so face isn't distorted
-      const vW = camVideo.videoWidth  || 640;
-      const vH = camVideo.videoHeight || 480;
-      const cropSize = Math.min(vW, vH);
-      const sx = (vW - cropSize) / 2;
-      const sy = (vH - cropSize) / 2;
-
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(cx + r, cy + r, r, 0, Math.PI * 2);
-      ctx.clip();
-      if (cameraFlipped) {
-        ctx.translate(2 * cx + size, 0);
-        ctx.scale(-1, 1);
+      const right  = canvas.width  - size - margin;
+      const bottom = canvas.height - size - margin;
+      let cx, cy, outOfBounds = false;
+      if (camXY) {
+        const rawCx = Math.round(camXY.x * canvas.width)  - size / 2;
+        const rawCy = Math.round(camXY.y * canvas.height) - size / 2;
+        // Fully off-screen = out of bounds (hide camera + red ring)
+        outOfBounds = (rawCx + size < 0 || rawCx > canvas.width || rawCy + size < 0 || rawCy > canvas.height);
+        // Clamp to keep partially-visible cameras from disappearing
+        cx = Math.max(-size / 2, Math.min(canvas.width  - size / 2, rawCx));
+        cy = Math.max(-size / 2, Math.min(canvas.height - size / 2, rawCy));
+      } else {
+        cx = camPosition === 'tl' || camPosition === 'bl' ? margin : right;
+        cy = camPosition === 'tl' || camPosition === 'tr' ? margin : bottom;
       }
-      ctx.drawImage(camVideo, sx, sy, cropSize, cropSize, cx, cy, size, size);
-      ctx.restore();
 
-      // White border ring
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(cx + r, cy + r, r, 0, Math.PI * 2);
-      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
-      ctx.lineWidth   = Math.max(3, size * 0.04);
-      ctx.stroke();
-      ctx.restore();
+      if (!outOfBounds) {
+        const r = size / 2;
+        const vW = camVideo.videoWidth  || 640;
+        const vH = camVideo.videoHeight || 480;
+        const cropSize = Math.min(vW, vH);
+        const sx = (vW - cropSize) / 2;
+        const sy = (vH - cropSize) / 2;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx + r, cy + r, r, 0, Math.PI * 2);
+        ctx.clip();
+        if (cameraFlipped) {
+          ctx.translate(2 * cx + size, 0);
+          ctx.scale(-1, 1);
+        }
+        ctx.drawImage(camVideo, sx, sy, cropSize, cropSize, cx, cy, size, size);
+        ctx.restore();
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(cx + r, cy + r, r, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+        ctx.lineWidth   = Math.max(3, size * 0.04);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Notify bubble if out-of-bounds state changed
+      if (outOfBounds !== camLastOutOfBounds) {
+        camLastOutOfBounds = outOfBounds;
+        window.api.notifyCamOutOfBounds(outOfBounds);
+      }
     }
   }
 
@@ -168,6 +196,26 @@ window.api.onSwitchSource(async (sourceId) => {
     statusEl.textContent = 'Source switched.';
   } catch (e) {
     statusEl.textContent = `Switch failed: ${e.message}`;
+  }
+});
+
+// ── Pause / resume ────────────────────────────────────────
+let pausedAt = 0;
+let pausedMs = 0;
+window.api.onPause(isPaused => {
+  if (!mediaRecorder) return;
+  if (isPaused && mediaRecorder.state === 'recording') {
+    mediaRecorder.pause();
+    pausedAt = Date.now();
+    clearInterval(timerInterval);
+    statusEl.textContent = 'Paused';
+  } else if (!isPaused && mediaRecorder.state === 'paused') {
+    pausedMs += Date.now() - pausedAt;
+    mediaRecorder.resume();
+    timerInterval = setInterval(() => {
+      window.api.timerTick(Math.floor((Date.now() - startTime - pausedMs) / 1000));
+    }, 1000);
+    statusEl.textContent = 'Recording…';
   }
 });
 

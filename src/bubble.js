@@ -6,6 +6,7 @@ const camSection = document.getElementById('cam-section');
 const camToggle  = document.getElementById('cam-toggle');
 const camIcon    = document.getElementById('cam-icon');
 const camText    = document.getElementById('cam-text');
+const pauseBtn   = document.getElementById('pause-btn');
 const stopBtn    = document.getElementById('stop-btn');
 const discardBtn = document.getElementById('discard-btn');
 const drawBtn    = document.getElementById('draw-btn');
@@ -53,6 +54,7 @@ camToggle.addEventListener('click', () => {
   camSection.classList.toggle('hidden', !camVisible);
   camText.textContent = camVisible ? 'Hide Camera' : 'Show Camera';
   camToggle.classList.toggle('cam-on', camVisible);
+  window.api.setCamVisible(camVisible);
   setTimeout(resizeWindow, 350);
 });
 
@@ -70,10 +72,25 @@ function setBubbleSize(size) {
   bubbleDrag.style.width  = size + 'px';
   bubbleDrag.style.height = size + 'px';
   const winW = size + 24;
+  // S=80→0.10, M=140→0.18, L=200→0.26 of canvas min dimension
+  const ratio = size / 140 * 0.18;
+  window.api.setCamSize(ratio);
   setTimeout(() => {
     resizeWindow(winW);
   }, 50);
 }
+
+// ── Camera position ───────────────────────────────────────
+let camPos = 'br';
+document.querySelectorAll('.pos-btn').forEach(btn => {
+  btn.classList.toggle('active', btn.dataset.pos === camPos);
+  btn.addEventListener('click', () => {
+    camPos = btn.dataset.pos;
+    document.querySelectorAll('.pos-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    window.api.setCamPosition(camPos);
+  });
+});
 
 // ── Flip camera ───────────────────────────────────────────
 const flipBtn = document.getElementById('flip-btn');
@@ -96,6 +113,21 @@ window.api.onAnnotateClosed(() => {
   annotating = false;
   drawBtn.classList.remove('active');
   drawBtn.textContent = '✏️ Draw';
+});
+
+// ── Pause / resume ────────────────────────────────────────
+let isPaused = false;
+pauseBtn.addEventListener('click', () => {
+  isPaused = !isPaused;
+  window.api.pauseRecording(isPaused);
+  pauseBtn.textContent = isPaused ? '▶ Resume' : '⏸ Pause';
+  pauseBtn.classList.toggle('paused', isPaused);
+  // Show paused state on timer
+  if (isPaused) {
+    timerEl.style.opacity = '0.4';
+  } else {
+    timerEl.style.opacity = '1';
+  }
 });
 
 // ── Stop / discard ────────────────────────────────────────
@@ -131,6 +163,12 @@ window.api.onSourceSwitched && window.api.onSourceSwitched(name => {
   void bubbleDrag.offsetWidth; // reflow to restart animation
   bubbleDrag.classList.add('jumping');
   setTimeout(() => bubbleDrag.classList.remove('jumping'), 550);
+});
+
+// ── Camera out-of-bounds indicator ───────────────────
+window.api.onCamOutOfBounds(outOfBounds => {
+  const bubble = document.getElementById('bubble-drag');
+  bubble.classList.toggle('cam-out', outOfBounds);
 });
 
 // ── Drag bubble window ────────────────────────────────────

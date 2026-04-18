@@ -18,7 +18,9 @@ let trimIn      = 0;
 let trimOut     = 0;
 let cuts        = [];
 let annotations = [];
-let annHistory  = [];
+let _history    = [];   // unified undo: [{annotations, cuts}]
+let _redo       = [];
+let annHistory  = [];   // annotation-only undo (used internally)
 let annRedo     = [];
 let activeTool  = 'none';
 let activeColor = '#ef4444';
@@ -40,6 +42,9 @@ let subtitleFontSize = 22;
 let subtitlePos      = { x: 0.5, y: 0.88 }; // normalized center position
 let _subBBox         = null;                  // last drawn subtitle bounding box
 let _subDragging     = false;
+let _subResizing     = false;
+let _subResizeStartY = 0;
+let _subResizeStartSize = 22;
 let currentFilePath  = null;
 let _whisperPipe     = null;
 
@@ -97,6 +102,23 @@ video.addEventListener('timeupdate', () => {
   updateTimeDisplay();
   drawTimeline();
   redrawAnnotations();
+  // Auto-scroll transcript and highlight current segment
+  if (subtitleSegments.length) {
+    const t = video.currentTime;
+    const activeSeg = subtitleSegments.find((s, i) => {
+      const next = subtitleSegments[i + 1];
+      return t >= s.start && (!next || t < next.start);
+    });
+    const container = document.getElementById('subtitle-segments');
+    container.querySelectorAll('.sub-seg').forEach(el => {
+      const isActive = activeSeg && el.dataset.segId === String(activeSeg.id);
+      el.classList.toggle('playing', isActive);
+    });
+    if (activeSeg && !video.paused) {
+      const el = container.querySelector(`[data-seg-id="${activeSeg.id}"]`);
+      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
   highlightCurrentSubSegment();
 });
 video.addEventListener('ended', () => { playBtn.textContent = '▶ Play'; });
@@ -141,23 +163,27 @@ playBtn.addEventListener('click', () => {
 
 // ── Trim / cut ────────────────────────────────────────────
 document.getElementById('mark-in-btn').addEventListener('click', () => {
+  if (!selectMode) { selectMode = true; selectModeBtn.classList.add('active'); selectModeBtn.textContent = '⬚ Select ✓'; }
   trimIn = video.currentTime;
   if (trimIn >= trimOut) trimOut = duration;
   drawTimeline();
 });
 document.getElementById('mark-out-btn').addEventListener('click', () => {
+  if (!selectMode) { selectMode = true; selectModeBtn.classList.add('active'); selectModeBtn.textContent = '⬚ Select ✓'; }
   trimOut = video.currentTime;
   if (trimOut <= trimIn) trimIn = 0;
   drawTimeline();
 });
 document.getElementById('cut-btn').addEventListener('click', () => {
   if (trimIn >= trimOut) return;
+  saveState();
   cuts.push({ start: trimIn, end: trimOut });
   cuts.sort((a, b) => a.start - b.start);
   trimIn = 0; trimOut = duration;
   drawTimeline(); renderCutsList();
 });
 document.getElementById('reset-trim-btn').addEventListener('click', () => {
+  saveState();
   trimIn = 0; trimOut = duration; cuts = [];
   subtitleCuts = new Set();
   drawTimeline(); renderCutsList(); renderSubtitleList();
@@ -176,11 +202,13 @@ function drawTimeline() {
   if (!duration) return;
   const tx = t => (t / duration) * W;
 
-  // Selection region (blue highlight)
-  tctx.fillStyle = 'rgba(96,165,250,0.22)';
-  tctx.fillRect(tx(trimIn), 0, tx(trimOut) - tx(trimIn), H);
-  tctx.fillStyle = 'rgba(96,165,250,0.7)';
-  tctx.fillRect(tx(trimIn), H/2 - 6, tx(trimOut) - tx(trimIn), 12);
+  // Selection region (blue highlight) — only in select mode
+  if (selectMode && (trimIn > 0 || trimOut < duration)) {
+    tctx.fillStyle = 'rgba(96,165,250,0.22)';
+    tctx.fillRect(tx(trimIn), 0, tx(trimOut) - tx(trimIn), H);
+    tctx.fillStyle = 'rgba(96,165,250,0.7)';
+    tctx.fillRect(tx(trimIn), H/2 - 6, tx(trimOut) - tx(trimIn), 12);
+  }
 
   // Cut regions with draggable edge handles
   cuts.forEach(c => {
@@ -200,11 +228,13 @@ function drawTimeline() {
     });
   });
 
-  // Trim handles
-  [trimIn, trimOut].forEach(t => {
-    tctx.fillStyle = '#fff';
-    tctx.fillRect(tx(t) - 2, 0, 4, H);
-  });
+  // Trim handles — only in select mode
+  if (selectMode && (trimIn > 0 || trimOut < duration)) {
+    [trimIn, trimOut].forEach(t => {
+      tctx.fillStyle = '#fff';
+      tctx.fillRect(tx(t) - 2, 0, 4, H);
+    });
+  }
 
   // Annotation time range bars + start markers
   annotations.forEach(a => {
@@ -226,7 +256,20 @@ function drawTimeline() {
   tctx.fill();
 }
 
-// ── Timeline interaction: drag = select range, click = seek ──
+// ── Select mode ───────────────────────────────────────────
+let selectMode = false;
+const selectModeBtn = document.getElementById('select-mode-btn');
+selectModeBtn.addEventListener('click', () => {
+  selectMode = !selectMode;
+  selectModeBtn.classList.toggle('active', selectMode);
+  selectModeBtn.textContent = selectMode ? '⬚ Select ✓' : '⬚ Select';
+  if (!selectMode) {
+    trimIn = 0; trimOut = duration;
+    drawTimeline();
+  }
+});
+
+// ── Timeline interaction: drag = select range (only in selectMode), click = seek ──
 let _tlDragStartX  = null;
 let _tlDragStartPct = null;
 let _tlIsDragging  = false;
@@ -288,13 +331,17 @@ window.addEventListener('mousemove', e => {
 
   if (!isDraggingPlayhead || !duration) return;
   const dx = Math.abs(e.clientX - _tlDragStartX);
-  if (dx > 4) {
+  if (dx > 4 && selectMode) {
     _tlIsDragging = true;
     const curPct = tlPct(e);
     trimIn  = Math.min(_tlDragStartPct, curPct) * duration;
     trimOut = Math.max(_tlDragStartPct, curPct) * duration;
     drawTimeline();
     tlCanvas.style.cursor = 'col-resize';
+  } else if (dx > 4 && !selectMode) {
+    // seek playhead while dragging
+    video.currentTime = tlPct(e) * duration;
+    drawTimeline();
   }
 });
 
@@ -389,8 +436,7 @@ function canvasPoint(e) {
 
 // ── Annotations ───────────────────────────────────────────
 function saveAnnotation(ann) {
-  annHistory.push(JSON.parse(JSON.stringify(annotations)));
-  annRedo = [];
+  saveState();
   annotations.push({ ...ann, id: Date.now(), endTime: duration || 9999 });
   redrawAnnotations();
   drawTimeline();
@@ -469,18 +515,33 @@ function drawAnnotation(c, a, W, H) {
   c.restore();
 }
 
+// ── Unified state save/restore ────────────────────────────
+function saveState() {
+  _history.push({ annotations: JSON.parse(JSON.stringify(annotations)), cuts: JSON.parse(JSON.stringify(cuts)), subtitleCuts: [...subtitleCuts] });
+  _redo = [];
+  // keep annHistory in sync for draw tool
+  annHistory.push(JSON.parse(JSON.stringify(annotations)));
+  annRedo = [];
+}
+
 // ── Undo / Redo ───────────────────────────────────────────
 document.getElementById('undo-btn').addEventListener('click', () => {
-  if (!annHistory.length) return;
-  annRedo.push(JSON.parse(JSON.stringify(annotations)));
-  annotations = annHistory.pop();
-  redrawAnnotations(); drawTimeline(); renderAnnList();
+  if (!_history.length) return;
+  _redo.push({ annotations: JSON.parse(JSON.stringify(annotations)), cuts: JSON.parse(JSON.stringify(cuts)), subtitleCuts: [...subtitleCuts] });
+  const prev = _history.pop();
+  annotations = prev.annotations;
+  cuts = prev.cuts;
+  subtitleCuts = new Set(prev.subtitleCuts);
+  redrawAnnotations(); drawTimeline(); renderAnnList(); renderCutsList(); renderSubtitleList();
 });
 document.getElementById('redo-btn').addEventListener('click', () => {
-  if (!annRedo.length) return;
-  annHistory.push(JSON.parse(JSON.stringify(annotations)));
-  annotations = annRedo.pop();
-  redrawAnnotations(); drawTimeline(); renderAnnList();
+  if (!_redo.length) return;
+  _history.push({ annotations: JSON.parse(JSON.stringify(annotations)), cuts: JSON.parse(JSON.stringify(cuts)), subtitleCuts: [...subtitleCuts] });
+  const next = _redo.pop();
+  annotations = next.annotations;
+  cuts = next.cuts;
+  subtitleCuts = new Set(next.subtitleCuts);
+  redrawAnnotations(); drawTimeline(); renderAnnList(); renderCutsList(); renderSubtitleList();
 });
 
 // ── Parse typed time string → seconds ────────────────────
@@ -873,6 +934,12 @@ function openUploadModal() {
   succWrap.style.display = 'none';
   _uploadRecordId = null;
 
+  // Clear stale sessions that have no refresh_token (can't silently renew)
+  if (_uploadSession && !_uploadSession.refresh_token) {
+    _uploadSession = null;
+    localStorage.removeItem('br_upload_session');
+  }
+
   if (_uploadSession) {
     loginWrap.style.display = 'none';
     userInfo.style.display  = 'block';
@@ -910,15 +977,15 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
 
   try {
     // ── 1. Auth ──────────────────────────────────────────
+    progWrap.style.display = 'flex';
+    pfill.style.width = '5%';
+
     if (!_uploadSession) {
       const email    = document.getElementById('upload-email').value.trim();
       const password = document.getElementById('upload-password').value;
       if (!email || !password) throw new Error('Email and password required');
 
       statusEl.textContent = 'Signing in…';
-      progWrap.style.display = 'flex';
-      pfill.style.width = '5%';
-
       const authRes = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON },
@@ -927,17 +994,46 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
       const authData = await authRes.json();
       if (!authRes.ok) throw new Error(authData.error_description || authData.msg || 'Login failed');
 
-      _uploadSession = { access_token: authData.access_token, user_id: authData.user.id, email };
+      _uploadSession = { access_token: authData.access_token, refresh_token: authData.refresh_token, user_id: authData.user.id, email };
       localStorage.setItem('br_upload_session', JSON.stringify(_uploadSession));
       document.getElementById('upload-login-wrap').style.display = 'none';
       document.getElementById('upload-user-info').style.display  = 'block';
       document.getElementById('upload-user-info').textContent = `Logged in · ${email}`;
+    } else if (!_uploadSession.refresh_token) {
+      // Old session without refresh_token — force re-login
+      _uploadSession = null;
+      localStorage.removeItem('br_upload_session');
+      throw new Error('Session expired — please log in again');
     } else {
-      progWrap.style.display = 'flex';
+      // Silently refresh token in case it expired
+      statusEl.textContent = 'Refreshing session…';
+      try {
+        const refRes = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON },
+          body: JSON.stringify({ refresh_token: _uploadSession.refresh_token }),
+        });
+        if (refRes.ok) {
+          const refData = await refRes.json();
+          _uploadSession.access_token  = refData.access_token;
+          _uploadSession.refresh_token = refData.refresh_token;
+          localStorage.setItem('br_upload_session', JSON.stringify(_uploadSession));
+        } else {
+          // Refresh failed — clear session and ask to log in again
+          _uploadSession = null;
+          localStorage.removeItem('br_upload_session');
+          throw new Error('Session expired — please log in again');
+        }
+      } catch (refErr) {
+        if (refErr.message.includes('Session expired')) throw refErr;
+        // Network error during refresh — continue with existing token
+      }
     }
 
     const { access_token, user_id } = _uploadSession;
     const title    = document.getElementById('upload-title').value.trim() || 'Recording';
+    const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const storagePath = `${user_id}/${recordId}.webm`;
 
     // ── 2. Read file ──────────────────────────────────────
     statusEl.textContent = 'Reading file…';
@@ -946,56 +1042,41 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
     if (!arr) throw new Error('Could not read recording file');
     const buffer = new Uint8Array(arr);
 
-    // ── 3. Create recording DB entry ──────────────────────
-    statusEl.textContent = 'Creating recording…';
-    pfill.style.width = '15%';
-    const recRes = await fetch(`${APP_URL}/api/recordings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access_token}` },
-      body: JSON.stringify({ title, duration: Math.round(duration), file_size: buffer.byteLength }),
-    });
-    const rec = await recRes.json();
-    if (!recRes.ok) throw new Error(rec.error || 'Failed to create recording');
-    _uploadRecordId = rec.id;
-
-    // ── 4. Upload chunks ──────────────────────────────────
+    // ── 3. Upload in chunks directly to Supabase storage ──
     const totalChunks = Math.ceil(buffer.byteLength / CHUNK_SIZE);
+    const uploadedChunkPaths = [];
+
     for (let i = 0; i < totalChunks; i++) {
       const start     = i * CHUNK_SIZE;
       const chunk     = buffer.slice(start, start + CHUNK_SIZE);
-      const chunkName = String(i).padStart(4, '0');
-      const path      = `${user_id}/${_uploadRecordId}/chunks/${chunkName}`;
+      const chunkPath = `recordings/${user_id}/${recordId}/chunk-${String(i).padStart(4, '0')}`;
 
       statusEl.textContent = `Uploading… ${i + 1}/${totalChunks}`;
-      pfill.style.width = (15 + ((i + 1) / totalChunks) * 70) + '%';
+      pfill.style.width = (10 + ((i + 1) / totalChunks) * 75) + '%';
 
-      const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${path}`, {
+      let upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${chunkPath}`, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${access_token}`, apikey: SUPABASE_ANON, 'Content-Type': 'application/octet-stream' },
+        headers: { Authorization: `Bearer ${access_token}`, apikey: SUPABASE_ANON, 'Content-Type': 'application/octet-stream', 'x-upsert': 'true' },
         body: chunk,
       });
       if (!upRes.ok) {
         const e = await upRes.json().catch(() => ({}));
-        throw new Error(e.message || `Chunk ${i} upload failed`);
+        throw new Error(e.message || e.error || `Upload failed (chunk ${i})`);
       }
+      uploadedChunkPaths.push(chunkPath);
     }
 
-    // ── 5. Assemble ───────────────────────────────────────
-    statusEl.textContent = 'Assembling…';
+    // ── 4. Build public URL ───────────────────────────────
     pfill.style.width = '90%';
-    const asmRes = await fetch(`${APP_URL}/api/recordings/${_uploadRecordId}/assemble`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${access_token}` },
-      body: JSON.stringify({ title, duration: Math.round(duration) }),
-    });
-    if (!asmRes.ok) { const e = await asmRes.json().catch(() => ({})); throw new Error(e.error || 'Assembly failed'); }
+    statusEl.textContent = 'Finalizing…';
+    const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${uploadedChunkPaths[0]}`;
 
     pfill.style.width = '100%';
     progWrap.style.display = 'none';
     succWrap.style.display = 'flex';
 
     document.getElementById('upload-open-btn').onclick = () => {
-      window.api.openExternal(`${APP_URL}/dashboard`);
+      window.api.openExternal(publicUrl);
     };
 
   } catch (e) {
@@ -1136,17 +1217,50 @@ async function generateSubtitles() {
     statusEl.textContent = 'Transcribing… (takes ~same time as video length)';
     pfill.style.width = '30%';
 
+    const selectedLang = document.getElementById('sub-lang').value || null;
+
     const result = await _whisperPipe(audio, {
       return_timestamps: true,
       chunk_length_s: 30,
       stride_length_s: 5,
       task: 'transcribe',
-      language: null,
+      language: selectedLang,
+      generate_kwargs: {
+        no_repeat_ngram_size: 5,
+        repetition_penalty: 1.3,
+        condition_on_previous_text: false,
+      },
     });
 
-    const chunks = result?.chunks ?? [];
-    subtitleSegments = chunks
-      .filter(c => c.text?.trim())
+    const rawChunks = result?.chunks ?? [];
+
+    // Detect and strip hallucination loops
+    function isHallucinated(chunks) {
+      const allWords = chunks.flatMap(c => (c.text || '').trim().split(/\s+/).filter(Boolean));
+      if (allWords.length < 10) return false;
+      const unique = new Set(allWords.map(w => w.toLowerCase().replace(/[^\p{L}]/gu, '')));
+      // Less than 15% unique word ratio = repetition loop
+      return unique.size / allWords.length < 0.15;
+    }
+
+    const deduped = isHallucinated(rawChunks)
+      ? []
+      : rawChunks.filter((c, i, arr) => {
+          if (!c.text?.trim()) return false;
+          const t = c.text.trim().toLowerCase();
+          const prev = arr.slice(Math.max(0, i - 3), i).map(x => x.text?.trim().toLowerCase());
+          return prev.filter(p => p === t).length < 2;
+        });
+
+    if (!deduped.length && rawChunks.length) {
+      statusEl.textContent = '⚠ Hallucination detected — no clear speech found in audio.';
+      btn.disabled = false;
+      btn.textContent = 'Generate Subtitles';
+      pbar.style.display = 'none';
+      return;
+    }
+
+    subtitleSegments = deduped
       .map((c, i) => ({
         id: i,
         start: c.timestamp[0] ?? 0,
@@ -1222,6 +1336,7 @@ document.getElementById('sub-cut-float-btn').addEventListener('click', () => {
   const start    = Math.min(...times);
   const end      = Math.max(...endTimes);
   if (end > start) {
+    saveState();
     cuts.push({ start, end });
     cuts.sort((a, b) => a.start - b.start);
     drawTimeline();
@@ -1241,6 +1356,7 @@ function renderSubtitleList() {
     const el     = document.createElement('div');
     el.className = 'sub-seg' + (isCut ? ' cut' : '');
     el.dataset.id = seg.id;
+    el.dataset.segId = seg.id;
 
     const words   = seg.text.split(/\s+/).filter(Boolean);
     const wordDur = (seg.end - seg.start) / (words.length || 1);
@@ -1255,6 +1371,7 @@ function renderSubtitleList() {
     el.innerHTML = `
       <div class="sub-seg-header">
         <span class="sub-seg-time">${fmt(seg.start)}</span>
+        <button class="sub-edit-btn" title="Edit text">✎</button>
         <button class="sub-cut-btn">${isCut ? '↩ Restore' : '✂ Cut all'}</button>
       </div>
       <div class="sub-words">${wordHtml}</div>`;
@@ -1288,8 +1405,16 @@ function renderSubtitleList() {
 
       wEl.addEventListener('mouseup', e => {
         if (!_isDragging) {
-          // short click → seek
-          video.currentTime = parseFloat(wEl.dataset.t);
+          // single click → seek + select this word + cut it immediately
+          const t  = parseFloat(wEl.dataset.t);
+          const te = parseFloat(wEl.dataset.te);
+          video.currentTime = t;
+          if (te > t) {
+            saveState();
+            cuts.push({ start: t, end: te });
+            cuts.sort((a, b) => a.start - b.start);
+            drawTimeline(); renderCutsList(); renderSubtitleList();
+          }
         }
       });
     });
@@ -1297,6 +1422,31 @@ function renderSubtitleList() {
     el.querySelector('.sub-seg-time').addEventListener('click', e => {
       e.stopPropagation();
       video.currentTime = seg.start;
+    });
+
+    el.querySelector('.sub-edit-btn').addEventListener('click', e => {
+      e.stopPropagation();
+      const wordsDiv = el.querySelector('.sub-words');
+      const ta = document.createElement('textarea');
+      ta.className = 'sub-edit-area';
+      ta.value = seg.text;
+      ta.rows = 2;
+      wordsDiv.replaceWith(ta);
+      ta.focus();
+      ta.addEventListener('input', () => {
+        ta.style.height = 'auto';
+        ta.style.height = ta.scrollHeight + 'px';
+      });
+      const commit = () => {
+        const newText = ta.value.trim();
+        if (newText) subtitleSegments[subtitleSegments.findIndex(s => s.id === seg.id)].text = newText;
+        renderSubtitleList();
+        redrawAnnotations();
+      };
+      ta.addEventListener('blur', commit);
+      ta.addEventListener('keydown', e2 => {
+        if (e2.key === 'Escape') { renderSubtitleList(); }
+      });
     });
 
     el.querySelector('.sub-cut-btn').addEventListener('click', e => {
@@ -1345,12 +1495,46 @@ function highlightCurrentSubSegment() {
 // ── Draw subtitle overlay on canvas ──────────────────────
 function drawSubtitleOverlay(c, W, H, t) {
   if (!subtitleSegments.length) return;
+
+  const fs = subtitleFontSize;
+  const px = 18, py = 9;
+
+  // Always keep bbox current so drag/resize works even when no subtitle showing
+  if (c === ctx) {
+    c.save();
+    c.font = `bold ${fs}px -apple-system, "Helvetica Neue", Arial, sans-serif`;
+    const sampleW = c.measureText(subtitleSegments[0]?.text || 'Subtitle').width;
+    const bw = Math.min(sampleW + px * 2, W * 0.95);
+    const bh = fs + py * 2;
+    _subBBox = { bx: subtitlePos.x * W - bw / 2, by: subtitlePos.y * H - bh / 2, bw, bh };
+    c.restore();
+  }
+
   const seg = subtitleSegments.find(s => t >= s.start && t < s.end && !subtitleCuts.has(s.id));
-  if (!seg) return;
+  if (!seg) {
+    // Draw ghost handle so user can reposition even when no subtitle active
+    if (c === ctx) {
+      const { bx, by, bw, bh } = _subBBox;
+      c.save();
+      c.strokeStyle = 'rgba(255,255,255,0.15)';
+      c.lineWidth = 1;
+      c.setLineDash([4, 4]);
+      c.strokeRect(bx, by, bw, bh);
+      // resize corner
+      const hs = 10;
+      c.fillStyle = 'rgba(255,255,255,0.25)';
+      c.beginPath();
+      c.moveTo(bx + bw - hs, by + bh);
+      c.lineTo(bx + bw, by + bh);
+      c.lineTo(bx + bw, by + bh - hs);
+      c.closePath();
+      c.fill();
+      c.restore();
+    }
+    return;
+  }
 
   const text = seg.text;
-  const fs   = subtitleFontSize;
-  const px   = 18, py = 9;
 
   c.save();
   c.font = `bold ${fs}px -apple-system, "Helvetica Neue", Arial, sans-serif`;
@@ -1362,7 +1546,7 @@ function drawSubtitleOverlay(c, W, H, t) {
   const bx    = subtitlePos.x * W - bw / 2;
   const by    = subtitlePos.y * H - bh / 2;
 
-  // Save bbox for drag hit-testing (only on preview canvas)
+  // Update bbox with actual text width
   if (c === ctx) _subBBox = { bx, by, bw, bh };
 
   if (subtitleBg !== 'none') {
@@ -1375,34 +1559,66 @@ function drawSubtitleOverlay(c, W, H, t) {
 
   c.fillStyle = subtitleTxtCol;
   c.fillText(seg.text, bx + px, by + py + fs * 0.85);
+
+  // Resize handle at bottom-right (only on preview canvas)
+  if (c === ctx) {
+    const hs = 10;
+    c.fillStyle = 'rgba(255,255,255,0.55)';
+    c.beginPath();
+    c.moveTo(bx + bw - hs, by + bh);
+    c.lineTo(bx + bw, by + bh);
+    c.lineTo(bx + bw, by + bh - hs);
+    c.closePath();
+    c.fill();
+  }
+
   c.restore();
 }
 
-// ── Subtitle drag on canvas (when tool = none) ────────────
+// ── Subtitle drag + resize on canvas (when tool = none) ──
 canvas.addEventListener('mousemove', e => {
   if (activeTool !== 'none' || !_subBBox) return;
   const r  = canvas.getBoundingClientRect();
   const cx = (e.clientX - r.left) / r.width  * canvas.width;
   const cy = (e.clientY - r.top)  / r.height * canvas.height;
   const { bx, by, bw, bh } = _subBBox;
+  const nearResize = cx >= bx + bw - 16 && cx <= bx + bw + 4 && cy >= by + bh - 16 && cy <= by + bh + 4;
   const over = cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh;
-  canvas.style.cursor = over ? 'move' : 'default';
 
+  if (_subResizing && e.buttons === 1) {
+    const dy = cy - _subResizeStartY;
+    subtitleFontSize = Math.max(12, Math.min(72, _subResizeStartSize + Math.round(dy / 2.5)));
+    document.getElementById('sub-size').value = subtitleFontSize;
+    document.getElementById('sub-size-val').textContent = subtitleFontSize;
+    redrawAnnotations();
+    return;
+  }
   if (_subDragging && e.buttons === 1) {
     subtitlePos.x = Math.max(0.05, Math.min(0.95, cx / canvas.width));
     subtitlePos.y = Math.max(0.05, Math.min(0.95, cy / canvas.height));
     redrawAnnotations();
+    return;
   }
+
+  canvas.style.cursor = nearResize ? 'se-resize' : over ? 'move' : 'default';
 });
+
 canvas.addEventListener('mousedown', e => {
   if (activeTool !== 'none' || !_subBBox) return;
   const r  = canvas.getBoundingClientRect();
   const cx = (e.clientX - r.left) / r.width  * canvas.width;
   const cy = (e.clientY - r.top)  / r.height * canvas.height;
   const { bx, by, bw, bh } = _subBBox;
-  if (cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh) {
+  const nearResize = cx >= bx + bw - 16 && cx <= bx + bw + 4 && cy >= by + bh - 16 && cy <= by + bh + 4;
+  const over = cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh;
+  if (nearResize) {
+    _subResizing = true;
+    _subResizeStartY = cy;
+    _subResizeStartSize = subtitleFontSize;
+    e.preventDefault();
+  } else if (over) {
     _subDragging = true;
     e.preventDefault();
   }
 });
-window.addEventListener('mouseup', () => { _subDragging = false; });
+window.addEventListener('mouseup', () => { _subDragging = false; _subResizing = false; });

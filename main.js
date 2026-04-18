@@ -115,22 +115,52 @@ ipcMain.handle('get-sources', async () => {
 });
 
 // ── IPC: start recording ───────────────────────────────────
+let lastRecordingOpts = null;
 ipcMain.handle('start-recording', (_, opts) => {
+  lastRecordingOpts = opts;
   pickerWin?.hide();
   createBubble(opts.cameraDeviceId);
   createRecorder(opts);
 });
 
-// ── IPC: stop / discard ────────────────────────────────────
+// ── IPC: stop / discard / restart ─────────────────────────
 ipcMain.on('stop-recording',    () => recorderWin?.webContents.send('stop'));
 ipcMain.on('pause-recording',   (_, v) => recorderWin?.webContents.send('pause', v));
 ipcMain.on('discard-recording', () => recorderWin?.webContents.send('discard'));
+ipcMain.on('restart-recording', () => {
+  if (!lastRecordingOpts) return;
+  // Close existing windows directly — skip discard IPC to avoid picker opening
+  const opts = lastRecordingOpts;
+  annotateWin?.close(); annotateWin = null;
+  switcherWin?.close(); switcherWin = null;
+  bubbleWin?.destroy();  bubbleWin  = null;
+  recorderWin?.destroy(); recorderWin = null;
+  setTimeout(() => {
+    createBubble(opts.cameraDeviceId);
+    createRecorder(opts);
+  }, 200);
+});
 
 // ── IPC: save temp file → open editor ─────────────────────
-ipcMain.handle('save-temp', async (_, { buffer }) => {
+// ── IPC: streaming temp file (write chunks as they arrive) ──
+let _streamPath = null;
+ipcMain.handle('create-temp-file', () => {
+  _streamPath = path.join(os.tmpdir(), `br-${Date.now()}.webm`);
+  fs.writeFileSync(_streamPath, Buffer.alloc(0)); // create empty file
+  return _streamPath;
+});
+ipcMain.handle('append-chunk', (_, arrayBuf) => {
+  if (!_streamPath) return;
+  try { fs.appendFileSync(_streamPath, Buffer.from(arrayBuf)); } catch {}
+});
+ipcMain.handle('save-temp', async (_, arrayBuf) => {
+  // Fallback: if streaming was used, file already exists; else write now
+  if (_streamPath && fs.existsSync(_streamPath) && fs.statSync(_streamPath).size > 0) {
+    const p = _streamPath; _streamPath = null; return p;
+  }
   const tmpPath = path.join(os.tmpdir(), `br-${Date.now()}.webm`);
-  const buf = Array.isArray(buffer) ? Buffer.from(buffer) : Buffer.from(new Uint8Array(buffer));
-  fs.writeFileSync(tmpPath, buf);
+  fs.writeFileSync(tmpPath, Buffer.from(arrayBuf));
+  _streamPath = null;
   return tmpPath;
 });
 

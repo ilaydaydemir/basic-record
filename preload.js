@@ -7,7 +7,9 @@ contextBridge.exposeInMainWorld('api', {
   selectRegion:       ()       => ipcRenderer.invoke('select-region'),
 
   // Recorder → editor flow
-  saveTemp:           (data)   => ipcRenderer.invoke('save-temp', data),
+  createTempFile:     ()       => ipcRenderer.invoke('create-temp-file'),
+  appendChunk:        (buf)    => ipcRenderer.invoke('append-chunk', buf),
+  saveTemp:           (buf)    => ipcRenderer.invoke('save-temp', buf),
   openEditor:         (fp)     => ipcRenderer.send('open-editor', fp),
   recordingDiscarded: ()       => ipcRenderer.send('recording-discarded'),
   onStart:            (cb)     => ipcRenderer.on('start',         (_, d) => cb(d)),
@@ -19,6 +21,7 @@ contextBridge.exposeInMainWorld('api', {
   // Bubble controls
   stopRecording:      ()       => ipcRenderer.send('stop-recording'),
   pauseRecording:     (v)      => ipcRenderer.send('pause-recording', v),
+  restartRecording:   ()       => ipcRenderer.send('restart-recording'),
   discardRecording:   ()       => ipcRenderer.send('discard-recording'),
   bubbleDrag:         (d)      => ipcRenderer.send('bubble-drag', d),
   resizeBubble:       (sz)     => ipcRenderer.send('resize-bubble', sz),

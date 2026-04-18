@@ -136,8 +136,16 @@ stopBtn.addEventListener('click', () => {
   stopBtn.textContent = '…';
   window.api.stopRecording();
 });
+document.getElementById('restart-btn').addEventListener('click', () => {
+  if (confirm('Restart recording? Current recording will be discarded.')) {
+    window.api.restartRecording();
+  }
+});
 discardBtn.addEventListener('click', () => {
   if (confirm('Discard this recording?')) window.api.discardRecording();
+});
+document.getElementById('cancel-btn').addEventListener('click', () => {
+  window.api.discardRecording();
 });
 
 // ── Switch source ─────────────────────────────────────────

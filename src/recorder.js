@@ -167,8 +167,17 @@ window.api.onStart(async ({ sourceId, cameraDeviceId, micDeviceId, region: reg }
       .find(m => MediaRecorder.isTypeSupported(m)) || 'video/webm';
 
     mediaRecorder = new MediaRecorder(combined, { mimeType });
-    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
-    mediaRecorder.onstop = handleStop;
+    // Stream chunks directly to disk — nothing kept in RAM
+    await window.api.createTempFile();
+    let _writeQueue = Promise.resolve();
+    mediaRecorder.ondataavailable = e => {
+      if (e.data.size === 0) return;
+      _writeQueue = _writeQueue.then(async () => {
+        const ab = await e.data.arrayBuffer();
+        await window.api.appendChunk(ab);
+      });
+    };
+    mediaRecorder.onstop = async () => { await _writeQueue; handleStop(); };
     mediaRecorder.start(1000);
 
     startTime     = Date.now();
@@ -220,8 +229,17 @@ window.api.onPause(isPaused => {
 });
 
 // ── Stop / discard ────────────────────────────────────────
-window.api.onStop(()    => { if (mediaRecorder?.state !== 'inactive') mediaRecorder.stop(); });
-window.api.onDiscard(() => { discarded = true; if (mediaRecorder?.state !== 'inactive') mediaRecorder.stop(); });
+window.api.onStop(() => {
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  if (mediaRecorder.state === 'paused') mediaRecorder.resume();
+  mediaRecorder.stop();
+});
+window.api.onDiscard(() => {
+  discarded = true;
+  if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+  if (mediaRecorder.state === 'paused') mediaRecorder.resume();
+  mediaRecorder.stop();
+});
 
 async function handleStop() {
   clearInterval(timerInterval);
@@ -231,11 +249,16 @@ async function handleStop() {
 
   if (discarded) { window.api.recordingDiscarded(); return; }
 
-  statusEl.textContent = 'Saving…';
-  const blob = new Blob(chunks, { type: mediaRecorder.mimeType || 'video/webm' });
-  const buf  = await blob.arrayBuffer();
-  const tmpPath = await window.api.saveTemp({ buffer: Array.from(new Uint8Array(buf)) });
-  window.api.openEditor(tmpPath);
+  try {
+    statusEl.textContent = 'Saving…';
+    // File was streamed to disk chunk by chunk — just get the path
+    const tmpPath = await window.api.saveTemp(null);
+    if (!tmpPath) throw new Error('No temp file found');
+    window.api.openEditor(tmpPath);
+  } catch (e) {
+    statusEl.textContent = `Save error: ${e.message}`;
+    console.error('handleStop error:', e);
+  }
 }
 
 async function captureSource(sourceId) {

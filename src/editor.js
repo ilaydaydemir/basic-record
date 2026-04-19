@@ -518,11 +518,13 @@ function drawAnnotation(c, a, W, H) {
 }
 
 // ── Unified state save/restore ────────────────────────────
+const MAX_HISTORY = 50;
 function saveState() {
   _history.push({ annotations: JSON.parse(JSON.stringify(annotations)), cuts: JSON.parse(JSON.stringify(cuts)), subtitleCuts: [...subtitleCuts] });
+  if (_history.length > MAX_HISTORY) _history.shift();
   _redo = [];
-  // keep annHistory in sync for draw tool
   annHistory.push(JSON.parse(JSON.stringify(annotations)));
+  if (annHistory.length > MAX_HISTORY) annHistory.shift();
   annRedo = [];
 }
 
@@ -833,42 +835,51 @@ async function runExport(preset) {
   const totalDur = keepRanges.reduce((s, r) => s + r.end - r.start, 0);
   let elapsed = 0;
 
-  for (const range of keepRanges) {
-    video.currentTime = range.start;
-    await new Promise(r => { video.onseeked = () => r(); });
-    video.muted = true;
-    video.play();
+  try {
+    for (const range of keepRanges) {
+      video.currentTime = range.start;
+      // Seek with 8s timeout — prevents indefinite hang on corrupted files
+      await Promise.race([
+        new Promise(r => { video.onseeked = () => { video.onseeked = null; r(); }; }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Seek timed out')), 8000)),
+      ]);
+      video.muted = true;
+      video.play();
 
-    await new Promise(resolve => {
-      let raf;
-      const tick = () => {
-        const t = video.currentTime;
-        oc.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outW, outH);
-        annotations.filter(a => a.time <= t && t < (a.endTime ?? 9999)).forEach(a => drawAnnotation(oc, a, outW, outH));
-        drawSubtitleOverlay(oc, outW, outH, t);
+      await new Promise(resolve => {
+        let raf;
+        const done = () => { video.pause(); video.onended = null; cancelAnimationFrame(raf); resolve(); };
+        const tick = () => {
+          const t = video.currentTime;
+          oc.drawImage(video, srcX, srcY, srcW, srcH, 0, 0, outW, outH);
+          annotations.filter(a => a.time <= t && t < (a.endTime ?? 9999)).forEach(a => drawAnnotation(oc, a, outW, outH));
+          drawSubtitleOverlay(oc, outW, outH, t);
+          elapsed += 1 / 30;
+          exportStatus.textContent = `Encoding ${preset.name}… ${Math.min(99, Math.round((elapsed / totalDur) * 100))}%`;
+          if (t >= range.end - 0.05 || video.ended) done(); else raf = requestAnimationFrame(tick);
+        };
+        raf = requestAnimationFrame(tick);
+        video.onended = done;
+      });
+    }
 
-        elapsed += 1 / 30;
-        exportStatus.textContent = `Encoding ${preset.name}… ${Math.min(99, Math.round((elapsed / totalDur) * 100))}%`;
-
-        if (t >= range.end - 0.05 || video.ended) {
-          video.pause(); cancelAnimationFrame(raf); resolve();
-        } else {
-          raf = requestAnimationFrame(tick);
-        }
-      };
-      raf = requestAnimationFrame(tick);
-      video.onended = () => { cancelAnimationFrame(raf); resolve(); };
-    });
+    mr.stop();
+    await new Promise(r => { mr.onstop = async () => { await _writeQueue; r(); }; });
+    exportStatus.textContent = 'Saving…';
+    await window.api.exportStreamClose();
+    exportStatus.textContent = `✓ Saved (${preset.name})!`;
+    setTimeout(() => { exportStatus.textContent = ''; }, 4000);
+  } catch (err) {
+    if (mr.state !== 'inactive') mr.stop();
+    await _writeQueue.catch(() => {});
+    await window.api.exportStreamClose().catch(() => {});
+    exportStatus.textContent = `Export failed: ${err.message}`;
+    setTimeout(() => { exportStatus.textContent = ''; }, 5000);
+  } finally {
+    video.muted = false;
+    video.onseeked = null;
+    video.onended = null;
   }
-
-  mr.stop();
-  await new Promise(r => { mr.onstop = async () => { await _writeQueue; r(); }; });
-  video.muted = false;
-
-  exportStatus.textContent = 'Saving…';
-  await window.api.exportStreamClose();
-  exportStatus.textContent = `✓ Saved (${preset.name})!`;
-  setTimeout(() => { exportStatus.textContent = ''; }, 4000);
 }
 
 // ── Playback speed popup ──────────────────────────────────
@@ -1331,16 +1342,19 @@ async function generateSubtitles() {
     if (!response.ok) throw new Error('Could not read video file');
     const buf = await response.arrayBuffer();
 
-    // Decode audio at 16kHz (Whisper needs 16kHz)
+    // Decode audio at 16kHz — always close context even on error
     const audioCtx = new AudioContext({ sampleRate: 16000 });
-    const decoded  = await audioCtx.decodeAudioData(buf);
-    await audioCtx.close();
-
-    const ch0 = decoded.getChannelData(0);
-    const ch1 = decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : null;
-    const audio = ch1
-      ? Float32Array.from({ length: ch0.length }, (_, i) => (ch0[i] + ch1[i]) / 2)
-      : Float32Array.from(ch0);
+    let audio;
+    try {
+      const decoded = await audioCtx.decodeAudioData(buf);
+      const ch0 = decoded.getChannelData(0);
+      const ch1 = decoded.numberOfChannels > 1 ? decoded.getChannelData(1) : null;
+      audio = ch1
+        ? Float32Array.from({ length: ch0.length }, (_, i) => (ch0[i] + ch1[i]) / 2)
+        : Float32Array.from(ch0);
+    } finally {
+      await audioCtx.close();
+    }
 
     // Transcribe
     statusEl.textContent = 'Transcribing… (takes ~same time as video length)';

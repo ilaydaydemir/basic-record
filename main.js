@@ -196,7 +196,7 @@ ipcMain.handle('get-sources', async () => {
   }
 
   return sources
-    .filter(s => !['Basic Record', 'Electron'].some(n => s.name.includes(n)))
+    .filter(s => s.name !== 'Basic Record' && s.name !== 'Electron')
     .map(s => {
       const isScreen = s.id.startsWith('screen:');
       return { id: s.id, name: cleanName(s.name, isScreen), thumbnail: s.thumbnail.toDataURL(), isScreen };
@@ -373,13 +373,14 @@ ipcMain.handle('get-file-size', (_, fp) => {
   try { return fs.statSync(fp).size; } catch { return 0; }
 });
 ipcMain.handle('read-file-chunk', (_, fp, start, len) => {
+  let fd;
   try {
     const buf = Buffer.alloc(len);
-    const fd  = fs.openSync(fp, 'r');
+    fd = fs.openSync(fp, 'r');
     const read = fs.readSync(fd, buf, 0, len, start);
-    fs.closeSync(fd);
     return buf.buffer.slice(0, read);
   } catch { return null; }
+  finally { try { if (fd !== undefined) fs.closeSync(fd); } catch {} }
 });
 
 // ── IPC: streaming export (chunks go to disk as they arrive) ──

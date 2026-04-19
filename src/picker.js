@@ -149,14 +149,19 @@ async function doLogin(isSignup) {
   loginBtn.disabled = true;
   loginBtn.textContent = isSignup ? 'Creating account…' : 'Signing in…';
   loginError.style.display = 'none';
-  const res = await window.api.userLogin({ email, password: pass, isSignup });
-  loginBtn.disabled = false;
-  loginBtn.textContent = isSignup ? 'Create Account' : 'Sign In';
-  if (res.ok) {
-    loginOverlay.style.display = 'none';
-    showUserBadge(email);
-  } else {
-    showLoginError(res.error || 'Authentication failed');
+  try {
+    const res = await window.api.userLogin({ email, password: pass, isSignup });
+    if (res.ok) {
+      loginOverlay.style.display = 'none';
+      showUserBadge(email);
+    } else {
+      showLoginError(res.error || 'Authentication failed');
+    }
+  } catch (e) {
+    showLoginError('Network error — check your connection');
+  } finally {
+    loginBtn.disabled = false;
+    loginBtn.textContent = isSignup ? 'Create Account' : 'Sign In';
   }
 }
 

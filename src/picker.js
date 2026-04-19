@@ -84,7 +84,14 @@ async function loadSources() {
       grid.innerHTML = '<div style="color:#444;font-size:12px;grid-column:1/-1;padding:20px 0;">No sources found. Try clicking refresh.</div>';
     }
   } catch (e) {
-    grid.innerHTML = `<div style="color:#f87171;font-size:12px;grid-column:1/-1;padding:20px 0;">Error: ${e.message}</div>`;
+    const isPermission = e.message.includes('Failed to get sources') || e.message.includes('permission');
+    grid.innerHTML = isPermission
+      ? `<div style="grid-column:1/-1;padding:20px 0;">
+           <div style="color:#f87171;font-size:13px;font-weight:600;margin-bottom:8px;">Screen Recording permission required</div>
+           <div style="color:#666;font-size:12px;margin-bottom:14px;">Go to System Settings → Privacy &amp; Security → Screen Recording and enable Basic Record.</div>
+           <button onclick="window.api.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')" style="background:#ef4444;border:none;color:#fff;border-radius:7px;padding:8px 14px;font-size:12px;font-weight:600;cursor:pointer;">Open System Settings →</button>
+         </div>`
+      : `<div style="color:#f87171;font-size:12px;grid-column:1/-1;padding:20px 0;">Error: ${e.message}</div>`;
   }
 }
 

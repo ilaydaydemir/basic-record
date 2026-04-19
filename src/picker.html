@@ -72,6 +72,11 @@ select:focus { border-color: #3a3a3a; }
 </head>
 <body>
 
+<div id="perm-warning" style="display:none;position:fixed;top:0;left:0;right:0;z-index:9999;background:#ef4444;color:#fff;font-size:13px;font-weight:600;padding:10px 16px;align-items:center;justify-content:space-between;gap:12px">
+  <span>⚠️ Screen Recording permission required — recordings will be black without it.</span>
+  <button onclick="window.api.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')" style="background:rgba(255,255,255,0.2);border:1px solid rgba(255,255,255,0.4);color:#fff;border-radius:6px;padding:4px 10px;font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap">Open System Settings →</button>
+</div>
+
 <div class="titlebar">
   <div class="dot"></div>
   <span class="app-title">Basic Record</span>

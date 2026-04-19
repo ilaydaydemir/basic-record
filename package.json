@@ -2,7 +2,7 @@
   "name": "basic-record",
   "version": "1.0.0",
   "description": "Screen recorder with camera bubble",
-  "main": "main.js",
+  "main": "loader.js",
   "scripts": {
     "start": "electron .",
     "dist": "electron-builder --mac"
@@ -22,6 +22,8 @@
       }
     },
     "files": [
+      "loader.js",
+      "main-real.js",
       "main.js",
       "preload.js",
       "src/**/*",

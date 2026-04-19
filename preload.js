@@ -5,6 +5,7 @@ contextBridge.exposeInMainWorld('api', {
   getSources:         ()       => ipcRenderer.invoke('get-sources'),
   startRecording:     (opts)   => ipcRenderer.invoke('start-recording', opts),
   selectRegion:       ()       => ipcRenderer.invoke('select-region'),
+  checkScreenPermission: ()    => ipcRenderer.invoke('check-screen-permission'),
 
   // Recorder → editor flow
   createTempFile:     ()       => ipcRenderer.invoke('create-temp-file'),
@@ -70,4 +71,5 @@ contextBridge.exposeInMainWorld('api', {
   editorDone:         ()       => ipcRenderer.send('editor-done'),
   openExternal:       (url)    => ipcRenderer.send('open-external', url),
   onLoadVideo:        (cb)     => ipcRenderer.on('load-video', (_, fp) => cb(fp)),
+  loadRendererOverride: (name) => ipcRenderer.invoke('load-renderer-override', name),
 });

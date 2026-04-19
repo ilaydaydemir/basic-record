@@ -157,6 +157,28 @@ function createEditor(filePath) {
   editorWin.loadFile('src/editor.html');
   editorWin.webContents.once('did-finish-load', () => {
     editorWin.webContents.send('load-video', filePath);
+    // Intercept fetch: auto-refresh JWT on 401/403 from Supabase REST
+    editorWin.webContents.executeJavaScript(`
+      (function() {
+        var _orig = window.fetch.bind(window);
+        window.fetch = async function(url, opts) {
+          var res = await _orig(url, opts);
+          if ((res.status === 401 || res.status === 403) &&
+              typeof url === 'string' && url.includes('/rest/v1/')) {
+            try {
+              var session = await window.api.getUserSession();
+              if (session && session.access_token) {
+                var h = opts && opts.headers ? opts.headers : {};
+                if (h instanceof Headers) { var tmp = {}; h.forEach(function(v,k){tmp[k]=v;}); h = tmp; }
+                var newOpts = Object.assign({}, opts, { headers: Object.assign({}, h, { Authorization: 'Bearer ' + session.access_token }) });
+                return _orig(url, newOpts);
+              }
+            } catch(e) {}
+          }
+          return res;
+        };
+      })();
+    `).catch(function() {});
   });
   editorWin.on('closed', () => {
     editorWin = null;
@@ -171,6 +193,11 @@ app.whenReady().then(async () => {
   loadDeviceSession();
   loadUserSession();
   ensureDeviceSession().catch(() => {});
+
+  // Request mic permission on first launch so recordings have audio
+  if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') {
+    systemPreferences.askForMediaAccess('microphone').catch(() => {});
+  }
 
   createPicker();
   app.on('activate', () => { if (!pickerWin) createPicker(); });
@@ -204,9 +231,22 @@ ipcMain.handle('get-sources', async () => {
     });
 });
 
+// ── IPC: screen permission check ──────────────────────────
+ipcMain.handle('check-screen-permission', () => {
+  return systemPreferences.getMediaAccessStatus('screen')
+})
+
+ipcMain.handle('check-mic-permission', () => {
+  return systemPreferences.getMediaAccessStatus('microphone')
+})
+
 // ── IPC: start recording ───────────────────────────────────
 let lastRecordingOpts = null;
 ipcMain.handle('start-recording', (_, opts) => {
+  const perm = systemPreferences.getMediaAccessStatus('screen')
+  if (perm !== 'granted') {
+    return { error: 'no-permission' }
+  }
   lastRecordingOpts = opts;
   pickerWin?.hide();
   createBubble(opts.cameraDeviceId);
@@ -285,7 +325,11 @@ ipcMain.handle('save-temp', async (_, arrayBuf) => {
 
 // ── IPC: open existing file in editor ─────────────────────
 ipcMain.handle('open-existing-file', async () => {
+  const defaultDir = path.join(app.getPath('home'), 'Movies', 'Basic Record');
+  // Pass a dummy filename inside the target dir — macOS respects file paths and opens there
+  const defaultPath = path.join(defaultDir, 'select-a-recording.webm');
   const { filePath, canceled } = await dialog.showOpenDialog(pickerWin || editorWin, {
+    defaultPath,
     filters: [{ name: 'Video', extensions: ['webm', 'mp4', 'mov'] }],
     properties: ['openFile'],
   });
@@ -306,7 +350,6 @@ ipcMain.on('open-editor', (_, filePath) => {
 ipcMain.on('recording-discarded', () => {
   bubbleWin?.close();
   recorderWin?.close();
-  if (global._recOverlay) { try { global._recOverlay.destroy() } catch {} global._recOverlay = null }
   pickerWin?.show();
   if (!pickerWin) createPicker();
 });
@@ -450,6 +493,12 @@ ipcMain.handle('export-video', async (_, { buffer }) => {
   fs.writeFileSync(filePath, buf);
   shell.showItemInFolder(filePath);
   return { ok: true, filePath };
+});
+
+// ── IPC: renderer override loader ─────────────────────────
+ipcMain.handle('load-renderer-override', (_, name) => {
+  const p = path.join(app.getPath('userData'), `${name}-override.js`);
+  try { return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : null; } catch { return null; }
 });
 
 // ── IPC: editor done → back to picker ─────────────────────

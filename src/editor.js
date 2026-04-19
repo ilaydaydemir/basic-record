@@ -32,6 +32,7 @@ let cropStart   = null;
 let isCropping  = false;
 let isDraggingPlayhead = false;
 let _skippingCut = false;
+let speed = 1;
 
 // ── Subtitle state ────────────────────────────────────────
 let subtitleSegments = [];
@@ -47,10 +48,13 @@ let _subResizeStartY = 0;
 let _subResizeStartSize = 22;
 let currentFilePath  = null;
 let _whisperPipe     = null;
+let _autoUploadedStoragePath = null; // set when autoUpload succeeds; prevents duplicate DB row on manual upload
+let _autoUploadInProgress = false;   // guard against duplicate concurrent autoUploads
 
 // ── Load video ────────────────────────────────────────────
 window.api.onLoadVideo(fp => {
   currentFilePath = fp;
+  _autoUploadedStoragePath = null; // reset on every new video
   video.src = `file://${fp}`;
   video.load();
   // Start background upload if session exists
@@ -844,6 +848,7 @@ async function runExport(preset) {
         new Promise((_, rej) => setTimeout(() => rej(new Error('Seek timed out')), 8000)),
       ]);
       video.muted = true;
+      video.playbackRate = speed; // apply current speed to export
       video.play();
 
       await new Promise(resolve => {
@@ -882,6 +887,121 @@ async function runExport(preset) {
   }
 }
 
+// ── Processed upload (canvas-rendered blob → Supabase) ────
+async function runProcessedUpload(title, accessToken, userId, onProgress) {
+  let keepRanges = [];
+  let cursor = trimIn;
+  [...cuts].sort((a, b) => a.start - b.start).forEach(c => {
+    if (cursor < c.start) keepRanges.push({ start: cursor, end: c.start });
+    cursor = Math.max(cursor, c.end);
+  });
+  if (cursor < trimOut) keepRanges.push({ start: cursor, end: trimOut });
+  if (!keepRanges.length) keepRanges = [{ start: trimIn, end: trimOut }];
+
+  const vW = video.videoWidth  || 1280;
+  const vH = video.videoHeight || 720;
+  const offCanvas = document.createElement('canvas');
+  offCanvas.width = vW; offCanvas.height = vH;
+  const oc = offCanvas.getContext('2d');
+
+  const mimeType = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+    .find(m => MediaRecorder.isTypeSupported(m)) ?? 'video/webm';
+  const stream = offCanvas.captureStream(30);
+  const mr = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
+
+  const chunks = [];
+  mr.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+  mr.start(200);
+
+  const totalDur = keepRanges.reduce((s, r) => s + r.end - r.start, 0);
+  let elapsed = 0;
+
+  try {
+    for (const range of keepRanges) {
+      video.currentTime = range.start;
+      await Promise.race([
+        new Promise(r => { video.onseeked = () => { video.onseeked = null; r(); }; }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Seek timed out')), 8000)),
+      ]);
+      video.muted = true;
+      video.playbackRate = speed;
+      video.play();
+
+      await new Promise(resolve => {
+        let raf;
+        const done = () => { video.pause(); video.onended = null; cancelAnimationFrame(raf); resolve(); };
+        const tick = () => {
+          const t = video.currentTime;
+          oc.drawImage(video, 0, 0, vW, vH);
+          annotations.filter(a => a.time <= t && t < (a.endTime ?? 9999)).forEach(a => drawAnnotation(oc, a, vW, vH));
+          drawSubtitleOverlay(oc, vW, vH, t);
+          elapsed += 1 / 30;
+          onProgress(Math.min(80, Math.round((elapsed / totalDur) * 80)));
+          if (t >= range.end - 0.05 || video.ended) done(); else raf = requestAnimationFrame(tick);
+        };
+        raf = requestAnimationFrame(tick);
+        video.onended = done;
+      });
+    }
+
+    mr.stop();
+    await new Promise(r => { mr.onstop = () => r(); });
+
+    const blob = new Blob(chunks, { type: mimeType });
+
+    // Upload blob to Supabase storage
+    const recordId  = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const objectPath = `${userId}/${recordId}.webm`;
+
+    onProgress(82);
+    const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${objectPath}`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        apikey: SUPABASE_ANON,
+        'Content-Type': mimeType,
+        'x-upsert': 'true',
+      },
+      body: blob,
+    });
+    if (!upRes.ok) {
+      const e = await upRes.json().catch(() => ({}));
+      throw new Error(e.message || e.error || 'Storage upload failed');
+    }
+
+    onProgress(95);
+    await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        apikey: SUPABASE_ANON,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        user_id:        userId,
+        share_id:       recordId,
+        title:          title,
+        duration:       Math.round(totalDur / speed),
+        file_size:      blob.size,
+        mime_type:      'video/webm',
+        storage_path:   objectPath,
+        status:         'ready',
+        recording_mode: 'screen',
+        is_public:      true,
+      }),
+    });
+
+    onProgress(100);
+    return recordId;
+  } finally {
+    video.muted = false;
+    video.onseeked = null;
+    video.onended = null;
+    if (mr.state !== 'inactive') mr.stop();
+  }
+}
+
 // ── Playback speed popup ──────────────────────────────────
 const speedBtn   = document.getElementById('speed-btn');
 const speedPopup = document.getElementById('speed-popup');
@@ -899,6 +1019,7 @@ speedBtn.addEventListener('click', e => {
 document.querySelectorAll('.speed-opt').forEach(opt => {
   opt.addEventListener('click', () => {
     const spd = parseFloat(opt.dataset.speed);
+    speed = spd;
     video.playbackRate = spd;
     document.querySelectorAll('.speed-opt').forEach(x => x.classList.remove('active'));
     opt.classList.add('active');
@@ -967,6 +1088,8 @@ function _auError(msg) {
 // ── Auto-upload: fires when editor opens with a logged-in session ──
 async function autoUpload() {
   if (!currentFilePath) return;
+  if (_autoUploadInProgress) return;
+  _autoUploadInProgress = true;
   // Discard sessions without a refresh token
   if (_uploadSession && !_uploadSession.refresh_token) {
     _uploadSession = null;
@@ -1007,7 +1130,7 @@ async function autoUpload() {
 
     const { access_token, user_id } = _uploadSession;
     const recordId   = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const objectPath = `recordings/${user_id}/${recordId}.webm`;
+    const objectPath = `${user_id}/${recordId}.webm`; // path within bucket (no bucket prefix)
 
     // 2. Get file size
     _auShow('uploading', 'Reading file…', 4);
@@ -1025,7 +1148,7 @@ async function autoUpload() {
       const pct = Math.round(5 + ((i + 1) / totalChunks) * 90);
       _auShow('uploading', `Uploading… ${pct}%`, pct);
 
-      const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${objectPath}`, {
+      const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${objectPath}`, {
         method: i === 0 ? 'POST' : 'PUT',
         headers: {
           Authorization: `Bearer ${access_token}`,
@@ -1054,6 +1177,7 @@ async function autoUpload() {
       },
       body: JSON.stringify({
         user_id:        user_id,
+        share_id:       recordId,
         title:          `Recording ${new Date().toLocaleString('tr-TR', { hour:'2-digit', minute:'2-digit', month:'short', day:'numeric' })}`,
         duration:       Math.round(duration || 0),
         file_size:      fileSize,
@@ -1066,11 +1190,13 @@ async function autoUpload() {
     }).catch(() => {}); // non-critical — don't block share link
 
     // 5. Done — show Share button
-    const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${objectPath}`;
-    _auDone(publicUrl);
+    _autoUploadedStoragePath = objectPath; // mark so manual upload skips duplicate INSERT
+    _auDone(`${APP_URL}/watch/${recordId}`);
 
   } catch (err) {
     _auError(err.message || 'Unknown error');
+  } finally {
+    _autoUploadInProgress = false;
   }
 }
 
@@ -1190,70 +1316,103 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
 
     const { access_token, user_id } = _uploadSession;
     const title    = document.getElementById('upload-title').value.trim() || 'Recording';
-    const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const objectPath = `recordings/${user_id}/${recordId}.webm`;
 
-    // ── 2. Get file size ──────────────────────────────────
-    statusEl.textContent = 'Preparing…';
-    pfill.style.width = '5%';
-    const fileSize = await window.api.getFileSize(currentFilePath);
-    if (!fileSize) throw new Error('Could not read recording file');
+    let objectPath;
+    let recordId;
 
-    // ── 3. Upload in chunks (read from disk, never full RAM) ──
-    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
-    for (let i = 0; i < totalChunks; i++) {
-      const start  = i * CHUNK_SIZE;
-      const len    = Math.min(CHUNK_SIZE, fileSize - start);
-      const chunk  = await window.api.readFileChunk(currentFilePath, start, len);
-      if (!chunk) throw new Error(`Could not read chunk ${i}`);
+    const hasEdits = cuts.length > 0 || speed !== 1 || subtitleSegments.length > 0;
 
-      statusEl.textContent = `Uploading… ${i + 1}/${totalChunks}`;
-      pfill.style.width = (5 + ((i + 1) / totalChunks) * 85) + '%';
+    if (hasEdits) {
+      // ── Processed upload: render through canvas first ─────
+      statusEl.textContent = 'Rendering…';
+      pfill.style.width = '10%';
+      recordId = await runProcessedUpload(title, access_token, user_id, pct => {
+        pfill.style.width = (10 + pct * 0.85) + '%';
+        statusEl.textContent = pct < 80 ? `Rendering… ${pct}%` : pct < 95 ? 'Uploading…' : 'Saving…';
+      });
+      objectPath = `${user_id}/${recordId}.webm`;
+    } else if (_autoUploadedStoragePath) {
+      // ── Auto-upload already stored this file — just update title
+      objectPath = _autoUploadedStoragePath;
+      recordId = objectPath.split('/').pop().replace('.webm', '');
 
-      const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/${objectPath}`, {
-        method: i === 0 ? 'POST' : 'PUT',
+      pfill.style.width = '95%';
+      statusEl.textContent = 'Saving…';
+      await fetch(`${SUPABASE_URL}/rest/v1/recordings?storage_path=eq.${encodeURIComponent(objectPath)}`, {
+        method: 'PATCH',
         headers: {
           Authorization: `Bearer ${access_token}`,
           apikey: SUPABASE_ANON,
-          'Content-Type': 'application/octet-stream',
-          'x-upsert': 'true',
-          'Content-Range': `bytes ${start}-${start + len - 1}/${fileSize}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
         },
-        body: chunk,
-      });
-      if (!upRes.ok) {
-        const e = await upRes.json().catch(() => ({}));
-        throw new Error(e.message || e.error || `Upload failed at chunk ${i}`);
+        body: JSON.stringify({ title }),
+      }).catch(() => {});
+    } else {
+      // ── Raw file upload ───────────────────────────────────
+      recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      objectPath = `${user_id}/${recordId}.webm`;
+
+      statusEl.textContent = 'Preparing…';
+      pfill.style.width = '5%';
+      const fileSize = await window.api.getFileSize(currentFilePath);
+      if (!fileSize) throw new Error('Could not read recording file');
+
+      const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
+      for (let i = 0; i < totalChunks; i++) {
+        const start  = i * CHUNK_SIZE;
+        const len    = Math.min(CHUNK_SIZE, fileSize - start);
+        const chunk  = await window.api.readFileChunk(currentFilePath, start, len);
+        if (!chunk) throw new Error(`Could not read chunk ${i}`);
+
+        statusEl.textContent = `Uploading… ${i + 1}/${totalChunks}`;
+        pfill.style.width = (5 + ((i + 1) / totalChunks) * 85) + '%';
+
+        const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${objectPath}`, {
+          method: i === 0 ? 'POST' : 'PUT',
+          headers: {
+            Authorization: `Bearer ${access_token}`,
+            apikey: SUPABASE_ANON,
+            'Content-Type': 'application/octet-stream',
+            'x-upsert': 'true',
+            'Content-Range': `bytes ${start}-${start + len - 1}/${fileSize}`,
+          },
+          body: chunk,
+        });
+        if (!upRes.ok) {
+          const e = await upRes.json().catch(() => ({}));
+          throw new Error(e.message || e.error || `Upload failed at chunk ${i}`);
+        }
       }
+
+      pfill.style.width = '95%';
+      statusEl.textContent = 'Saving…';
+      await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${access_token}`,
+          apikey: SUPABASE_ANON,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify({
+          user_id:        user_id,
+          share_id:       recordId,
+          title:          title,
+          duration:       Math.round(duration || 0),
+          file_size:      fileSize,
+          mime_type:      'video/webm',
+          storage_path:   objectPath,
+          status:         'ready',
+          recording_mode: 'screen',
+          is_public:      true,
+        }),
+      }).catch(() => {});
     }
 
-    // ── 4. Save metadata to recordings table → appears in Vercel dashboard
-    pfill.style.width = '95%';
-    statusEl.textContent = 'Saving…';
-    await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${access_token}`,
-        apikey: SUPABASE_ANON,
-        'Content-Type': 'application/json',
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify({
-        user_id:        user_id,
-        title:          title,
-        duration:       Math.round(duration || 0),
-        file_size:      fileSize,
-        mime_type:      'video/webm',
-        storage_path:   objectPath,
-        status:         'ready',
-        recording_mode: 'screen',
-        is_public:      true,
-      }),
-    }).catch(() => {});
-
-    // ── 5. Build public URL ───────────────────────────────
+    // ── 5. Build share URL ────────────────────────────────
     statusEl.textContent = 'Finalizing…';
-    const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${objectPath}`;
+    const publicUrl = `${APP_URL}/watch/${recordId}`;
 
     pfill.style.width = '100%';
     progWrap.style.display = 'none';

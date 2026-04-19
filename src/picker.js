@@ -169,10 +169,22 @@ async function launchRecording() {
   });
 }
 
-startBtn.addEventListener('click', () => {
+startBtn.addEventListener('click', async () => {
   if (!selectedSourceId) return;
   startBtn.disabled = true;
   startBtn.textContent = 'Starting…';
+
+  // Re-check permission at click time
+  try {
+    const perm = await window.api.checkScreenPermission()
+    if (perm !== 'granted') {
+      window.api.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture')
+      startBtn.disabled = false;
+      startBtn.textContent = '▶ Start Recording';
+      return;
+    }
+  } catch {}
+
   startCountdown();
 });
 
@@ -263,6 +275,17 @@ logoutBtn.addEventListener('click', async () => {
 // Init
 loadDevices();
 loadSources();
+
+// Check screen recording permission on load
+(async () => {
+  try {
+    const perm = await window.api.checkScreenPermission()
+    const banner = document.getElementById('perm-warning')
+    if (banner && perm !== 'granted') {
+      banner.style.display = 'flex'
+    }
+  } catch {}
+})()
 
 document.getElementById('open-file-btn').addEventListener('click', () => {
   window.api.openExistingFile();

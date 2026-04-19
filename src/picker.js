@@ -115,16 +115,65 @@ regionBtn?.addEventListener('click', async () => {
   }
 });
 
-startBtn.addEventListener('click', async () => {
-  if (!selectedSourceId) return;
-  startBtn.disabled = true;
-  startBtn.textContent = 'Starting…';
+// ── Countdown before recording ────────────────────────────
+const countdownOverlay = document.getElementById('countdown-overlay');
+const countdownNum     = document.getElementById('countdown-num');
+const countdownCamBtn  = document.getElementById('countdown-cam-btn');
+const countdownCancel  = document.getElementById('countdown-cancel');
+let countdownCamOn = true;
+let countdownTimer = null;
+
+function startCountdown() {
+  countdownCamOn = !!camSelect.value; // off if no cam selected
+  updateCamBtn();
+  countdownOverlay.style.display = 'flex';
+  let n = 3;
+  countdownNum.textContent = n;
+
+  countdownTimer = setInterval(() => {
+    n--;
+    if (n <= 0) {
+      clearInterval(countdownTimer);
+      countdownOverlay.style.display = 'none';
+      launchRecording();
+    } else {
+      countdownNum.textContent = n;
+    }
+  }, 1000);
+}
+
+function updateCamBtn() {
+  countdownCamBtn.textContent = countdownCamOn ? '📷 Camera: On' : '📷 Camera: Off';
+  countdownCamBtn.style.color = countdownCamOn ? '#ccc' : '#555';
+}
+
+countdownCamBtn.addEventListener('click', () => {
+  if (!camSelect.value) return; // no cam, nothing to toggle
+  countdownCamOn = !countdownCamOn;
+  updateCamBtn();
+});
+
+countdownCancel.addEventListener('click', () => {
+  clearInterval(countdownTimer);
+  countdownOverlay.style.display = 'none';
+  startBtn.disabled = false;
+  startBtn.textContent = '▶ Start Recording';
+});
+
+async function launchRecording() {
   await window.api.startRecording({
     sourceId:       selectedSourceId,
-    cameraDeviceId: camSelect.value || null,
+    cameraDeviceId: (countdownCamOn && camSelect.value) ? camSelect.value : null,
     micDeviceId:    micSelect.value || null,
     region:         selectedRegion,
   });
+}
+
+startBtn.addEventListener('click', () => {
+  if (!selectedSourceId) return;
+  startBtn.disabled = true;
+  startBtn.textContent = 'Starting…';
+  startCountdown();
 });
 
 // ── Login overlay ─────────────────────────────────────────────

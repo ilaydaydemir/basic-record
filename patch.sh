@@ -1,5 +1,5 @@
 #!/bin/bash
-# patch.sh — update app JS without reinstalling (preserves macOS permissions)
+# patch.sh — update app JS and re-sign in-place
 set -e
 
 APP="/Applications/Basic Record.app"
@@ -21,4 +21,11 @@ npx asar pack "$TMP" "$ASAR"
 echo "→ Cleaning up…"
 rm -rf "$TMP"
 
+echo "→ Re-signing app (ad-hoc)…"
+codesign --force --deep --sign - "$APP" 2>/dev/null || true
+
 echo "✓ Done — restart Basic Record to apply changes"
+echo ""
+echo "⚠️  If Screen Recording permission was lost:"
+echo "   System Settings → Privacy & Security → Screen Recording"
+echo "   Toggle Basic Record OFF → ON → Quit & reopen app"

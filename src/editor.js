@@ -1090,17 +1090,19 @@ async function autoUpload() {
   if (!currentFilePath) return;
   if (_autoUploadInProgress) return;
   _autoUploadInProgress = true;
-  // Discard sessions without a refresh token
-  if (_uploadSession && !_uploadSession.refresh_token) {
-    _uploadSession = null;
-    localStorage.removeItem('br_upload_session');
-  }
-  // Fall back to auto device session if no manual login
-  if (!_uploadSession) {
-    _auShow('uploading', 'Setting up upload…', 1);
-    const deviceSess = await window.api.getDeviceSession().catch(() => null);
-    if (!deviceSess) { _auBar().style.display = 'none'; return; }
-    _uploadSession = deviceSess;
+  // Always prefer a fresh session from the main process
+  const freshSession = await window.api.getUserSession().catch(() => null);
+  if (freshSession && freshSession.access_token) {
+    _uploadSession = {
+      access_token:  freshSession.access_token,
+      refresh_token: freshSession.refresh_token,
+      user_id:       freshSession.user?.id || freshSession.user_id,
+      email:         freshSession.user?.email,
+    };
+    localStorage.setItem('br_upload_session', JSON.stringify(_uploadSession));
+  } else if (!_uploadSession || !_uploadSession.refresh_token) {
+    _auBar().style.display = 'none';
+    return;
   }
 
   try {
@@ -1283,34 +1285,33 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
       document.getElementById('upload-login-wrap').style.display = 'none';
       document.getElementById('upload-user-info').style.display  = 'block';
       document.getElementById('upload-user-info').textContent = `Logged in · ${email}`;
-    } else if (!_uploadSession.refresh_token) {
-      // Old session without refresh_token — force re-login
-      _uploadSession = null;
-      localStorage.removeItem('br_upload_session');
-      throw new Error('Session expired — please log in again');
     } else {
-      // Silently refresh token in case it expired
+      // Always get a fresh token from the main process (handles refresh automatically)
       statusEl.textContent = 'Refreshing session…';
-      try {
+      const freshSession = await window.api.getUserSession().catch(() => null);
+      if (freshSession && freshSession.access_token) {
+        _uploadSession.access_token  = freshSession.access_token;
+        _uploadSession.user_id       = freshSession.user?.id || freshSession.user_id || _uploadSession.user_id;
+        localStorage.setItem('br_upload_session', JSON.stringify(_uploadSession));
+      } else if (_uploadSession.refresh_token) {
+        // fallback: manual refresh
         const refRes = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=refresh_token`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', apikey: SUPABASE_ANON },
           body: JSON.stringify({ refresh_token: _uploadSession.refresh_token }),
-        });
-        if (refRes.ok) {
+        }).catch(() => null);
+        if (refRes && refRes.ok) {
           const refData = await refRes.json();
           _uploadSession.access_token  = refData.access_token;
           _uploadSession.refresh_token = refData.refresh_token;
           localStorage.setItem('br_upload_session', JSON.stringify(_uploadSession));
         } else {
-          // Refresh failed — clear session and ask to log in again
           _uploadSession = null;
           localStorage.removeItem('br_upload_session');
           throw new Error('Session expired — please log in again');
         }
-      } catch (refErr) {
-        if (refErr.message.includes('Session expired')) throw refErr;
-        // Network error during refresh — continue with existing token
+      } else {
+        throw new Error('Session expired — please log in again');
       }
     }
 

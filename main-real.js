@@ -107,7 +107,14 @@ function createPicker() {
     backgroundColor: '#111',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
   });
-  pickerWin.loadFile('src/picker.html');
+  // Load from userData if available (allows patching without asar repack)
+  const pickerHtml = path.join(app.getPath('userData'), 'src', 'picker.html');
+  if (fs.existsSync(pickerHtml)) {
+    const { pathToFileURL } = require('url');
+    pickerWin.loadURL(pathToFileURL(pickerHtml).href);
+  } else {
+    pickerWin.loadFile('src/picker.html');
+  }
   pickerWin.on('closed', () => { pickerWin = null; });
 }
 
@@ -154,7 +161,13 @@ function createEditor(filePath) {
     backgroundColor: '#0d0d0d',
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
   });
-  editorWin.loadFile('src/editor.html');
+  const editorHtml = path.join(app.getPath('userData'), 'src', 'editor.html');
+  if (fs.existsSync(editorHtml)) {
+    const { pathToFileURL } = require('url');
+    editorWin.loadURL(pathToFileURL(editorHtml).href);
+  } else {
+    editorWin.loadFile('src/editor.html');
+  }
   editorWin.webContents.once('did-finish-load', () => {
     editorWin.webContents.send('load-video', filePath);
     // Intercept fetch: auto-refresh JWT on 401/403 from Supabase REST
@@ -324,18 +337,86 @@ ipcMain.handle('save-temp', async (_, arrayBuf) => {
 });
 
 // ── IPC: open existing file in editor ─────────────────────
-ipcMain.handle('open-existing-file', async () => {
-  const defaultDir = path.join(app.getPath('home'), 'Movies', 'Basic Record');
-  // Pass a dummy filename inside the target dir — macOS respects file paths and opens there
-  const defaultPath = path.join(defaultDir, 'select-a-recording.webm');
-  const { filePath, canceled } = await dialog.showOpenDialog(pickerWin || editorWin, {
-    defaultPath,
-    filters: [{ name: 'Video', extensions: ['webm', 'mp4', 'mov'] }],
-    properties: ['openFile'],
-  });
-  if (canceled || !filePath?.[0]) return;
+ipcMain.on('pick-recording', (_, filePath) => {
   pickerWin?.hide();
-  createEditor(filePath[0]);
+  createEditor(filePath);
+});
+
+ipcMain.handle('list-recordings', async () => {
+  const fs = require('fs');
+  const dir = path.join(app.getPath('home'), 'Movies', 'Basic Record');
+  try {
+    const files = fs.readdirSync(dir)
+      .filter(f => /\.(webm|mp4|mov)$/i.test(f))
+      .map(f => {
+        const full = path.join(dir, f);
+        const stat = fs.statSync(full);
+        return { name: f, path: full, size: stat.size, mtime: stat.mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+    return files;
+  } catch { return []; }
+});
+
+ipcMain.handle('open-recording-file', async (_, filePath) => {
+  pickerWin?.hide();
+  createEditor(filePath);
+});
+
+ipcMain.handle('open-existing-file', async () => {
+  const dir = path.join(app.getPath('home'), 'Movies', 'Basic Record');
+  let files = [];
+  try {
+    files = fs.readdirSync(dir)
+      .filter(f => /\.(webm|mp4|mov)$/i.test(f))
+      .map(f => {
+        const full = path.join(dir, f);
+        const stat = fs.statSync(full);
+        return { name: f, path: full, size: stat.size, mtime: stat.mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  } catch {}
+
+  const rows = files.map(f => {
+    const d = new Date(f.mtime);
+    const date = d.toLocaleDateString('tr-TR', { day: 'numeric', month: 'short' }) + ' ' +
+                 d.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' });
+    const size = f.size > 1e9 ? (f.size/1e9).toFixed(1)+' GB' : f.size > 1e6 ? (f.size/1e6).toFixed(0)+' MB' : (f.size/1e3).toFixed(0)+' KB';
+    const safePath = f.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return `<button onclick="pick('${safePath}')" style="display:flex;align-items:center;gap:12px;width:100%;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:9px;padding:10px 14px;cursor:pointer;text-align:left;margin-bottom:6px;" onmouseover="this.style.borderColor='#ef4444'" onmouseout="this.style.borderColor='#2a2a2a'">
+      <span style="font-size:18px">🎥</span>
+      <span style="flex:1;overflow:hidden">
+        <span style="display:block;font-size:12px;font-weight:600;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${f.name}</span>
+        <span style="display:block;font-size:11px;color:#555;margin-top:2px">${date} · ${size}</span>
+      </span>
+      <span style="font-size:11px;color:#444">▶</span>
+    </button>`;
+  }).join('');
+
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8"><style>
+    *{margin:0;padding:0;box-sizing:border-box} body{background:#111;color:#fff;font-family:-apple-system,sans-serif;padding:20px;-webkit-app-region:drag}
+    .inner{-webkit-app-region:no-drag}
+    h2{font-size:13px;font-weight:700;color:#ccc;margin-bottom:14px}
+    .list{max-height:400px;overflow-y:auto}
+    .empty{color:#444;font-size:12px;padding:20px 0}
+  </style></head><body>
+  <div class="inner">
+    <h2>🎥 Movies / Basic Record</h2>
+    <div class="list">${rows || '<div class="empty">No recordings found</div>'}</div>
+  </div>
+  <script>
+    const {ipcRenderer} = require('electron');
+    function pick(p){ ipcRenderer.send('pick-recording', p); window.close(); }
+  </script>
+  </body></html>`;
+
+  const win = new BrowserWindow({
+    width: 480, height: 480,
+    titleBarStyle: 'hiddenInset',
+    backgroundColor: '#111',
+    webPreferences: { nodeIntegration: true, contextIsolation: false },
+  });
+  win.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
 });
 
 ipcMain.on('open-editor', (_, filePath) => {

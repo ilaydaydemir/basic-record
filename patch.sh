@@ -32,10 +32,14 @@ rm -rf "$TMP_CHECK"
 if [ "$LOADER_INSTALLED" = "true" ]; then
   # ── Fast path: loader already in bundle — just update userData override ────
   echo "→ loader.js detected in bundle — updating userData override only (no re-sign needed)…"
-  mkdir -p "$USERDATA"
-  cp "$SCRIPT_DIR/main-real.js"  "$USERDATA/main-override.js"
-  cp "$SCRIPT_DIR/preload.js"    "$USERDATA/preload.js"
-  cp "$SCRIPT_DIR/src/editor.js" "$USERDATA/editor-override.js"
+  mkdir -p "$USERDATA/src"
+  cp "$SCRIPT_DIR/main-real.js"      "$USERDATA/main-override.js"
+  cp "$SCRIPT_DIR/preload.js"        "$USERDATA/preload.js"
+  cp "$SCRIPT_DIR/src/editor.js"     "$USERDATA/editor-override.js"
+  cp "$SCRIPT_DIR/src/picker.html"   "$USERDATA/src/picker.html"
+  cp "$SCRIPT_DIR/src/picker.js"     "$USERDATA/src/picker.js"
+  cp "$SCRIPT_DIR/src/editor.html"   "$USERDATA/src/editor.html"
+  cp "$SCRIPT_DIR/src/editor.js"     "$USERDATA/src/editor.js"
   echo "✓ Done — main-override.js written to:"
   echo "  $USERDATA/main-override.js"
   echo ""
@@ -64,7 +68,15 @@ else
   rm -rf "$TMP"
 
   echo "→ Re-signing app (ad-hoc) — this is the LAST time…"
-  codesign --force --deep --sign - "$APP" 2>/dev/null || true
+  # Sign inside-out: dylibs → frameworks → helpers → main app
+  find "$APP" -name "*.dylib" | while read f; do codesign --force --sign - --timestamp=none "$f" 2>/dev/null; done
+  for fw in "$APP/Contents/Frameworks/"*.framework; do
+    codesign --force --sign - --timestamp=none "$fw" 2>/dev/null || true
+  done
+  for helper in "$APP/Contents/Frameworks/"*.app; do
+    codesign --force --deep --sign - --timestamp=none "$helper" 2>/dev/null || true
+  done
+  codesign --force --sign - --timestamp=none "$APP" 2>/dev/null || true
 
   # Also seed the userData override so it's ready for the next patch
   echo "→ Writing initial userData override…"

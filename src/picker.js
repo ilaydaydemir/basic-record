@@ -287,6 +287,49 @@ loadSources();
   } catch {}
 })()
 
+function fmtSize(b) {
+  if (b > 1e9) return (b / 1e9).toFixed(1) + ' GB';
+  if (b > 1e6) return (b / 1e6).toFixed(0) + ' MB';
+  return (b / 1e3).toFixed(0) + ' KB';
+}
+function fmtDate(ms) {
+  const d = new Date(ms);
+  return d.toLocaleDateString('tr-TR', { day:'numeric', month:'short' }) + ' ' +
+         d.toLocaleTimeString('tr-TR', { hour:'2-digit', minute:'2-digit' });
+}
+
+async function loadRecordingsList() {
+  const list = document.getElementById('recordings-list');
+  list.innerHTML = '<div style="color:#444;font-size:12px;padding:20px 0;">Loading…</div>';
+  const files = await window.api.listRecordings();
+  if (!files.length) {
+    list.innerHTML = '<div style="color:#444;font-size:12px;padding:20px 0;">No recordings found in Movies/Basic Record</div>';
+    return;
+  }
+  list.innerHTML = '';
+  files.forEach(f => {
+    const row = document.createElement('button');
+    row.style.cssText = 'display:flex;align-items:center;gap:12px;width:100%;background:#1a1a1a;border:1px solid #2a2a2a;border-radius:9px;padding:10px 14px;cursor:pointer;text-align:left;transition:border-color 0.15s;';
+    row.onmouseover = () => row.style.borderColor = '#ef4444';
+    row.onmouseout  = () => row.style.borderColor = '#2a2a2a';
+    row.innerHTML = `
+      <span style="font-size:20px;flex-shrink:0;">🎥</span>
+      <span style="flex:1;overflow:hidden;">
+        <span style="display:block;font-size:12px;font-weight:600;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${f.name}</span>
+        <span style="display:block;font-size:11px;color:#555;margin-top:2px;">${fmtDate(f.mtime)} · ${fmtSize(f.size)}</span>
+      </span>
+      <span style="font-size:11px;color:#444;">▶</span>
+    `;
+    row.addEventListener('click', () => window.api.openRecordingFile(f.path));
+    list.appendChild(row);
+  });
+}
+
 document.getElementById('open-file-btn').addEventListener('click', () => {
-  window.api.openExistingFile();
+  document.getElementById('recordings-overlay').style.display = 'flex';
+  loadRecordingsList();
 });
+document.getElementById('recordings-back').addEventListener('click', () => {
+  document.getElementById('recordings-overlay').style.display = 'none';
+});
+document.getElementById('recordings-refresh').addEventListener('click', loadRecordingsList);

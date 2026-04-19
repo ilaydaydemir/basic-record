@@ -1043,7 +1043,29 @@ async function autoUpload() {
       }
     }
 
-    // 4. Done — show Share button
+    // 4. Save metadata to recordings table → appears in Vercel dashboard
+    await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+        apikey: SUPABASE_ANON,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        user_id:        user_id,
+        title:          `Recording ${new Date().toLocaleString('tr-TR', { hour:'2-digit', minute:'2-digit', month:'short', day:'numeric' })}`,
+        duration:       Math.round(duration || 0),
+        file_size:      fileSize,
+        mime_type:      'video/webm',
+        storage_path:   objectPath,
+        status:         'ready',
+        recording_mode: 'screen',
+        is_public:      true,
+      }),
+    }).catch(() => {}); // non-critical — don't block share link
+
+    // 5. Done — show Share button
     const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${objectPath}`;
     _auDone(publicUrl);
 
@@ -1205,8 +1227,31 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
       }
     }
 
-    // ── 4. Build public URL ───────────────────────────────
+    // ── 4. Save metadata to recordings table → appears in Vercel dashboard
     pfill.style.width = '95%';
+    statusEl.textContent = 'Saving…';
+    await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${access_token}`,
+        apikey: SUPABASE_ANON,
+        'Content-Type': 'application/json',
+        Prefer: 'return=minimal',
+      },
+      body: JSON.stringify({
+        user_id:        user_id,
+        title:          title,
+        duration:       Math.round(duration || 0),
+        file_size:      fileSize,
+        mime_type:      'video/webm',
+        storage_path:   objectPath,
+        status:         'ready',
+        recording_mode: 'screen',
+        is_public:      true,
+      }),
+    }).catch(() => {});
+
+    // ── 5. Build public URL ───────────────────────────────
     statusEl.textContent = 'Finalizing…';
     const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${objectPath}`;
 

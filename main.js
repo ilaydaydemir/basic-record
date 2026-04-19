@@ -172,16 +172,6 @@ app.whenReady().then(async () => {
   loadUserSession();
   ensureDeviceSession().catch(() => {});
 
-  // Proactively request screen recording permission on macOS
-  if (process.platform === 'darwin') {
-    const status = systemPreferences.getMediaAccessStatus('screen');
-    if (status !== 'granted') {
-      // Trigger the permission request by calling getSources once
-      desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } })
-        .catch(() => {}); // Expected to fail — this just triggers the macOS permission prompt
-    }
-  }
-
   createPicker();
   app.on('activate', () => { if (!pickerWin) createPicker(); });
 });

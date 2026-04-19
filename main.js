@@ -382,7 +382,24 @@ ipcMain.handle('read-file-chunk', (_, fp, start, len) => {
   } catch { return null; }
 });
 
-// ── IPC: write exported file ────────────────────────────────
+// ── IPC: streaming export (chunks go to disk as they arrive) ──
+let _exportPath = null;
+ipcMain.handle('export-stream-open', (_, fp) => {
+  _exportPath = fp;
+  fs.writeFileSync(fp, Buffer.alloc(0));
+  return fp;
+});
+ipcMain.handle('export-stream-write', (_, arrayBuf) => {
+  if (!_exportPath) return;
+  try { fs.appendFileSync(_exportPath, Buffer.from(arrayBuf)); } catch {}
+});
+ipcMain.handle('export-stream-close', () => {
+  const p = _exportPath; _exportPath = null;
+  if (p) shell.showItemInFolder(p);
+  return p;
+});
+
+// ── IPC: write exported file (legacy fallback) ──────────────
 ipcMain.handle('write-export', async (_, { filePath, buffer }) => {
   try {
     fs.writeFileSync(filePath, Buffer.from(buffer));

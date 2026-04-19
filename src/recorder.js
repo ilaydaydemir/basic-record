@@ -178,6 +178,12 @@ window.api.onStart(async ({ sourceId, cameraDeviceId, micDeviceId, region: reg }
       });
     };
     mediaRecorder.onstop = async () => { await _writeQueue; handleStop(); };
+    mediaRecorder.onerror = e => {
+      // On error (e.g. track died during system sleep), attempt graceful stop
+      console.error('MediaRecorder error:', e);
+      clearInterval(timerInterval);
+      _writeQueue.then(() => handleStop());
+    };
     mediaRecorder.start(1000);
 
     startTime     = Date.now();
@@ -218,9 +224,19 @@ window.api.onPause(isPaused => {
     pausedAt = Date.now();
     clearInterval(timerInterval);
     statusEl.textContent = 'Paused';
-  } else if (!isPaused && mediaRecorder.state === 'paused') {
-    pausedMs += Date.now() - pausedAt;
-    mediaRecorder.resume();
+  } else if (!isPaused) {
+    // Accumulate paused duration regardless of how long the pause was
+    if (pausedAt > 0) {
+      pausedMs += Date.now() - pausedAt;
+      pausedAt = 0;
+    }
+    if (mediaRecorder.state === 'paused') {
+      mediaRecorder.resume();
+    } else if (mediaRecorder.state === 'inactive') {
+      // Track died during a very long pause — nothing we can do, just stop cleanly
+      statusEl.textContent = 'Recording ended (track lost)';
+      return;
+    }
     timerInterval = setInterval(() => {
       window.api.timerTick(Math.floor((Date.now() - startTime - pausedMs) / 1000));
     }, 1000);

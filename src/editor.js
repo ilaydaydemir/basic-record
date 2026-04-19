@@ -817,8 +817,17 @@ async function runExport(preset) {
     .find(m => MediaRecorder.isTypeSupported(m)) ?? 'video/webm';
   const stream = offCanvas.captureStream(30);
   const mr = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
-  const chunks = [];
-  mr.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+
+  // Stream chunks directly to disk — zero RAM accumulation
+  await window.api.exportStreamOpen(savePath);
+  let _writeQueue = Promise.resolve();
+  mr.ondataavailable = e => {
+    if (e.data.size === 0) return;
+    _writeQueue = _writeQueue.then(async () => {
+      const ab = await e.data.arrayBuffer();
+      await window.api.exportStreamWrite(ab);
+    });
+  };
   mr.start(200);
 
   const totalDur = keepRanges.reduce((s, r) => s + r.end - r.start, 0);
@@ -853,15 +862,12 @@ async function runExport(preset) {
   }
 
   mr.stop();
-  await new Promise(r => { mr.onstop = () => r(); });
+  await new Promise(r => { mr.onstop = async () => { await _writeQueue; r(); }; });
   video.muted = false;
 
-  exportStatus.textContent = 'Writing file…';
-  const blob   = new Blob(chunks, { type: mimeType });
-  const buf    = await blob.arrayBuffer();
-  const result = await window.api.writeExport({ filePath: savePath, buffer: buf });
-
-  exportStatus.textContent = result?.ok ? `✓ Saved (${preset.name})!` : `Error: ${result?.error || 'failed'}`;
+  exportStatus.textContent = 'Saving…';
+  await window.api.exportStreamClose();
+  exportStatus.textContent = `✓ Saved (${preset.name})!`;
   setTimeout(() => { exportStatus.textContent = ''; }, 4000);
 }
 
@@ -1318,15 +1324,16 @@ async function generateSubtitles() {
       });
     }
 
-    // Read file via IPC (avoids file:// fetch CORS issues)
+    // Stream file directly via file:// — avoids IPC serialization bottleneck
     statusEl.textContent = 'Reading audio…';
     pfill.style.width = '10%';
-    const arr = await window.api.readFile(currentFilePath);
-    if (!arr) throw new Error('Could not read video file');
+    const response = await fetch(`file://${currentFilePath}`);
+    if (!response.ok) throw new Error('Could not read video file');
+    const buf = await response.arrayBuffer();
 
     // Decode audio at 16kHz (Whisper needs 16kHz)
     const audioCtx = new AudioContext({ sampleRate: 16000 });
-    const decoded  = await audioCtx.decodeAudioData(new Uint8Array(arr).buffer);
+    const decoded  = await audioCtx.decodeAudioData(buf);
     await audioCtx.close();
 
     const ch0 = decoded.getChannelData(0);

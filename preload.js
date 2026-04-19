@@ -43,10 +43,6 @@ contextBridge.exposeInMainWorld('api', {
   onTimerTick:        (cb)     => ipcRenderer.on('timer-tick',     (_, s) => cb(s)),
   onAnnotateClosed:   (cb)     => ipcRenderer.on('annotate-closed',()     => cb()),
   onSourceSwitched:   (cb)     => ipcRenderer.on('source-switched',  (_, name) => cb(name)),
-  togglePreview:      ()       => ipcRenderer.send('toggle-preview'),
-  openEditorFile:     (fp)     => ipcRenderer.send('open-editor-file', fp),
-  onRecordingSaved:   (cb)     => ipcRenderer.on('recording-saved',   (_, fp)  => cb(fp)),
-  onPreviewClosed:    (cb)     => ipcRenderer.on('preview-closed',    ()       => cb()),
 
   // Annotation (live)
   sendAnnotationFrame:(data)   => ipcRenderer.send('annotation-frame', data),

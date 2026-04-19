@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, desktopCapturer, dialog, shell, screen, systemPreferences } = require('electron');
 const path  = require('path');
 const fs    = require('fs');
 const os    = require('os');
@@ -170,7 +170,18 @@ function createEditor(filePath) {
 app.whenReady().then(async () => {
   loadDeviceSession();
   loadUserSession();
-  ensureDeviceSession().catch(() => {}); // background, don't block startup
+  ensureDeviceSession().catch(() => {});
+
+  // Proactively request screen recording permission on macOS
+  if (process.platform === 'darwin') {
+    const status = systemPreferences.getMediaAccessStatus('screen');
+    if (status !== 'granted') {
+      // Trigger the permission request by calling getSources once
+      desktopCapturer.getSources({ types: ['screen'], thumbnailSize: { width: 1, height: 1 } })
+        .catch(() => {}); // Expected to fail — this just triggers the macOS permission prompt
+    }
+  }
+
   createPicker();
   app.on('activate', () => { if (!pickerWin) createPicker(); });
 });

@@ -8,8 +8,8 @@ const https = require('https');
 const SUPABASE_URL  = 'https://bgsvuywxejpmkstgqizq.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2MDc0MzMsImV4cCI6MjA4NzE4MzQzM30.EvHOy5sBbXzSxjRS5vPGzm8cnFrOXxDfclP-ru3VU_M';
 const PROJECT_REF   = 'bgsvuywxejpmkstgqizq';
-const MGMT_KEY      = '9f5c5772-2f35-44e7-8597-4ceb4b783300';
-let _serviceKey     = null;
+const MGMT_KEY      = 'sbp_19b3a89049e5be5b2db1c63ad797364c9d984f22';
+let _serviceKey     = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MTYwNzQzMywiZXhwIjoyMDg3MTgzNDMzfQ.9uigqyXaCI1xvmTGMK9BVjC9rEdvswms502-Z_M2R54';
 let _deviceSession = null;
 
 function deviceFilePath() {

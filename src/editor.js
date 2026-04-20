@@ -1019,34 +1019,23 @@ document.getElementById('back-btn').addEventListener('click', () => {
 const SUPABASE_URL  = 'https://bgsvuywxejpmkstgqizq.supabase.co';
 
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2MDc0MzMsImV4cCI6MjA4NzE4MzQzM30.EvHOy5sBbXzSxjRS5vPGzm8cnFrOXxDfclP-ru3VU_M';
-// Service role key — bypasses RLS; injected at patch time, never committed to git
-const SUPABASE_SERVICE = '__SUPABASE_SERVICE_KEY__';
-// Upload raw file via main-process Node.js streaming (no RAM overhead)
+const SUPABASE_SERVICE = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MTYwNzQzMywiZXhwIjoyMDg3MTgzNDMzfQ.9uigqyXaCI1xvmTGMK9BVjC9rEdvswms502-Z_M2R54';
+// Upload raw file via TUS (reads chunks with existing readFileChunk IPC — no new handler needed)
 async function blobUploadFilePath(filePath, userId, title, duration, onProgress) {
   const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const fileSize = await window.api.getFileSize(filePath);
-  const fileSizeMB = (fileSize / 1024 / 1024).toFixed(1);
-  const r = await window.api.uploadRecording({ filePath, userId, recordId, title, duration });
-  if (!r.ok) throw new Error(r.error || 'Upload failed');
-  return { ok: true, url: r.url, recordId };
+  if (!fileSize) throw new Error('Could not read file');
+  const objectPath = `${userId}/${recordId}.webm`;
+  await tusUpload(filePath, fileSize, objectPath, onProgress);
+  const url = `${SUPABASE_URL}/storage/v1/object/public/recordings/${objectPath}`;
+  return { ok: true, url, recordId };
 }
 
-// Upload a renderer Blob via chunked IPC → main-process temp file → stream upload
+// Upload a rendered Blob via TUS (uses SUPABASE_SERVICE key directly from renderer)
 async function blobUploadBlob(blobData, recordId, userId, title, duration, onProgress) {
-  await window.api.uploadBlobBegin();
-  const CHUNK = 4 * 1024 * 1024;
-  let offset = 0;
-  while (offset < blobData.size) {
-    const ab = await blobData.slice(offset, offset + CHUNK).arrayBuffer();
-    await window.api.uploadBlobChunk(ab);
-    offset += CHUNK;
-    if (onProgress) onProgress(Math.round((offset / blobData.size) * 60), (offset / 1024 / 1024).toFixed(1));
-  }
-  if (onProgress) onProgress(65, (blobData.size / 1024 / 1024).toFixed(1));
-  const r = await window.api.uploadBlobFinish({ userId, recordId, title, duration });
-  if (!r.ok) throw new Error(r.error || 'Upload failed');
-  if (onProgress) onProgress(100, (blobData.size / 1024 / 1024).toFixed(1));
-  return r.url;
+  const objectPath = `${userId}/${recordId}.webm`;
+  await tusUploadBlob(blobData, objectPath, onProgress);
+  return `${SUPABASE_URL}/storage/v1/object/public/recordings/${objectPath}`;
 }
 
 // TUS upload for a Blob (used by runProcessedUpload after canvas rendering)

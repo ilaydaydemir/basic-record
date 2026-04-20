@@ -45,6 +45,8 @@ if [ "$LOADER_INSTALLED" = "true" ]; then
   cp "$SCRIPT_DIR/src/picker.html"   "$USERDATA/src/picker.html"
   cp "$SCRIPT_DIR/src/picker.js"     "$USERDATA/src/picker.js"
   cp "$SCRIPT_DIR/src/editor.html"   "$USERDATA/src/editor.html"
+  cp "$SCRIPT_DIR/src/vercel-blob-client.js" "$USERDATA/src/vercel-blob-client.js"
+  # Recorder files NOT copied — let the original signed ASAR version handle recording
   # Inject service key into editor.js
   sed "s|__SUPABASE_SERVICE_KEY__|$SERVICE_KEY|g" "$SCRIPT_DIR/src/editor.js" > "$USERDATA/src/editor.js"
   cp "$USERDATA/src/editor.js"       "$USERDATA/editor-override.js"

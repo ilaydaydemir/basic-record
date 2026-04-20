@@ -49,6 +49,7 @@ let _subResizeStartSize = 22;
 let currentFilePath  = null;
 let _whisperPipe     = null;
 let _autoUploadedStoragePath = null; // set when autoUpload succeeds; prevents duplicate DB row on manual upload
+let _autoUploadedRecordId = null;
 let _autoUploadInProgress = false;   // guard against duplicate concurrent autoUploads
 
 // ── Load video ────────────────────────────────────────────
@@ -819,9 +820,14 @@ async function runExport(preset) {
   offCanvas.width = outW; offCanvas.height = outH;
   const oc = offCanvas.getContext('2d');
 
-  const mimeType = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+  const mimeType = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9', 'video/webm']
     .find(m => MediaRecorder.isTypeSupported(m)) ?? 'video/webm';
   const stream = offCanvas.captureStream(30);
+  // Add audio from the source video so export/processed upload keeps mic/voice track
+  try {
+    const videoStream = video.captureStream ? video.captureStream() : (video.mozCaptureStream ? video.mozCaptureStream() : null);
+    if (videoStream) videoStream.getAudioTracks().forEach(t => stream.addTrack(t));
+  } catch (e) { console.warn('Could not attach audio:', e.message); }
   const mr = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
 
   // Stream chunks directly to disk — zero RAM accumulation
@@ -904,9 +910,14 @@ async function runProcessedUpload(title, accessToken, userId, onProgress) {
   offCanvas.width = vW; offCanvas.height = vH;
   const oc = offCanvas.getContext('2d');
 
-  const mimeType = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
+  const mimeType = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9', 'video/webm']
     .find(m => MediaRecorder.isTypeSupported(m)) ?? 'video/webm';
   const stream = offCanvas.captureStream(30);
+  // Add audio from the source video so export/processed upload keeps mic/voice track
+  try {
+    const videoStream = video.captureStream ? video.captureStream() : (video.mozCaptureStream ? video.mozCaptureStream() : null);
+    if (videoStream) videoStream.getAudioTracks().forEach(t => stream.addTrack(t));
+  } catch (e) { console.warn('Could not attach audio:', e.message); }
   const mr = new MediaRecorder(stream, { mimeType, videoBitsPerSecond: 8_000_000 });
 
   const chunks = [];
@@ -948,43 +959,13 @@ async function runProcessedUpload(title, accessToken, userId, onProgress) {
     await new Promise(r => { mr.onstop = () => r(); });
 
     const blob = new Blob(chunks, { type: mimeType });
+    const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    // Upload blob to Supabase storage
-    const recordId  = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const objectPath = `${userId}/${recordId}.webm`;
-
-    // Upload blob via TUS (chunked) to avoid 50MB single-request limit
+    // Upload blob to Vercel Blob (no size limit) — DB row inserted by callback
     onProgress(82);
-    await tusUploadBlob(blob, objectPath, (pct) => {
-      onProgress(82 + pct * 0.13); // 82 → 95
+    await blobUploadBlob(blob, recordId, userId, title, totalDur / speed, (pct) => {
+      onProgress(82 + pct * 0.18); // 82 → 100
     });
-
-    onProgress(95);
-    const pInsRes = await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${SUPABASE_SERVICE}`,
-        apikey: SUPABASE_SERVICE,
-        'Content-Type': 'application/json',
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify({
-        user_id:        userId,
-        share_id:       recordId,
-        title:          title,
-        duration:       Math.round(totalDur / speed),
-        file_size:      blob.size,
-        mime_type:      'video/webm',
-        storage_path:   objectPath,
-        status:         'ready',
-        recording_mode: 'screen',
-        is_public:      true,
-      }),
-    });
-    if (!pInsRes.ok) {
-      const err = await pInsRes.json().catch(() => ({}));
-      throw new Error(err.message || err.error || `DB insert failed: ${pInsRes.status}`);
-    }
 
     onProgress(100);
     return recordId;
@@ -1040,6 +1021,33 @@ const SUPABASE_URL  = 'https://bgsvuywxejpmkstgqizq.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2MDc0MzMsImV4cCI6MjA4NzE4MzQzM30.EvHOy5sBbXzSxjRS5vPGzm8cnFrOXxDfclP-ru3VU_M';
 // Service role key — bypasses RLS; injected at patch time, never committed to git
 const SUPABASE_SERVICE = '__SUPABASE_SERVICE_KEY__';
+// Upload raw file via main-process Node.js streaming (no RAM overhead)
+async function blobUploadFilePath(filePath, userId, title, duration, onProgress) {
+  const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const fileSize = await window.api.getFileSize(filePath);
+  const fileSizeMB = (fileSize / 1024 / 1024).toFixed(1);
+  const r = await window.api.uploadRecording({ filePath, userId, recordId, title, duration });
+  if (!r.ok) throw new Error(r.error || 'Upload failed');
+  return { ok: true, url: r.url, recordId };
+}
+
+// Upload a renderer Blob via chunked IPC → main-process temp file → stream upload
+async function blobUploadBlob(blobData, recordId, userId, title, duration, onProgress) {
+  await window.api.uploadBlobBegin();
+  const CHUNK = 4 * 1024 * 1024;
+  let offset = 0;
+  while (offset < blobData.size) {
+    const ab = await blobData.slice(offset, offset + CHUNK).arrayBuffer();
+    await window.api.uploadBlobChunk(ab);
+    offset += CHUNK;
+    if (onProgress) onProgress(Math.round((offset / blobData.size) * 60), (offset / 1024 / 1024).toFixed(1));
+  }
+  if (onProgress) onProgress(65, (blobData.size / 1024 / 1024).toFixed(1));
+  const r = await window.api.uploadBlobFinish({ userId, recordId, title, duration });
+  if (!r.ok) throw new Error(r.error || 'Upload failed');
+  if (onProgress) onProgress(100, (blobData.size / 1024 / 1024).toFixed(1));
+  return r.url;
+}
 
 // TUS upload for a Blob (used by runProcessedUpload after canvas rendering)
 async function tusUploadBlob(blob, objectPath, onProgress) {
@@ -1251,59 +1259,29 @@ async function autoUpload() {
     }
 
     const { access_token, user_id } = _uploadSession;
-    const recordId   = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const objectPath = `${user_id}/${recordId}.webm`; // path within bucket (no bucket prefix)
+    const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    // 2. Get file size
-    _auShow('uploading', 'Reading file…', 4);
+    // 2. Upload via main-process streaming (no RAM accumulation)
     const fileSize = await window.api.getFileSize(currentFilePath);
     if (!fileSize) { _auError('Could not read recording file'); return; }
 
-    // 3. Upload via TUS resumable (works for any file size)
     const fileSizeMB = (fileSize / 1024 / 1024).toFixed(1);
-    _auShow('uploading', `Uploading 0MB / ${fileSizeMB}MB`, 5);
+    const autoTitle = `Recording ${new Date().toLocaleString('tr-TR', { hour:'2-digit', minute:'2-digit', month:'short', day:'numeric' })}`;
+    _auShow('uploading', `Uploading… 0MB / ${fileSizeMB}MB`, 5);
+
+    let result;
     try {
-      await tusUpload(currentFilePath, fileSize, objectPath, (pct, sent) => {
+      result = await blobUploadFilePath(currentFilePath, user_id, autoTitle, duration, (pct, sent) => {
         _auShow('uploading', `Uploading ${sent}MB / ${fileSizeMB}MB (${Math.round(pct)}%)`, 5 + pct * 0.85);
       });
     } catch (e) {
       _auError(e.message || 'Upload failed');
       return;
     }
-    _auShow('uploading', 'Saving…', 90);
+    _autoUploadedStoragePath = result.url;
+    _autoUploadedRecordId = result.recordId;
 
-    // 4. Save metadata to recordings table → appears in Vercel dashboard
-    const autoInsRes = await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${SUPABASE_SERVICE}`,
-        apikey: SUPABASE_SERVICE,
-        'Content-Type': 'application/json',
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify({
-        user_id:        user_id,
-        share_id:       recordId,
-        title:          `Recording ${new Date().toLocaleString('tr-TR', { hour:'2-digit', minute:'2-digit', month:'short', day:'numeric' })}`,
-        duration:       Math.round(duration || 0),
-        file_size:      fileSize,
-        mime_type:      'video/webm',
-        storage_path:   objectPath,
-        status:         'ready',
-        recording_mode: 'screen',
-        is_public:      true,
-      }),
-    });
-    if (!autoInsRes.ok) {
-      const err = await autoInsRes.json().catch(() => ({}));
-      console.error('autoUpload INSERT failed:', err);
-      _auError(err.message || err.error || `DB insert failed (${autoInsRes.status})`);
-      return;
-    }
-
-    // 5. Done — show Share button
-    _autoUploadedStoragePath = objectPath; // mark so manual upload skips duplicate INSERT
-    _auDone(`${APP_URL}/watch/${recordId}`);
+    _auDone(result.url);
 
   } catch (err) {
     _auError(err.message || 'Unknown error');
@@ -1428,7 +1406,6 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
     const { access_token, user_id } = _uploadSession;
     const title    = document.getElementById('upload-title').value.trim() || 'Recording';
 
-    let objectPath;
     let recordId;
 
     const hasEdits = cuts.length > 0 || speed !== 1 || subtitleSegments.length > 0;
@@ -1441,15 +1418,12 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
         pfill.style.width = (10 + pct * 0.85) + '%';
         statusEl.textContent = pct < 80 ? `Rendering… ${pct}%` : pct < 95 ? 'Uploading…' : 'Saving…';
       });
-      objectPath = `${user_id}/${recordId}.webm`;
-    } else if (_autoUploadedStoragePath) {
-      // ── Auto-upload already stored this file — just update title
-      objectPath = _autoUploadedStoragePath;
-      recordId = objectPath.split('/').pop().replace('.webm', '');
-
+    } else if (_autoUploadedRecordId) {
+      // ── Auto-upload already stored this file — just update title via service key
+      recordId = _autoUploadedRecordId;
       pfill.style.width = '95%';
       statusEl.textContent = 'Saving…';
-      await fetch(`${SUPABASE_URL}/rest/v1/recordings?storage_path=eq.${encodeURIComponent(objectPath)}`, {
+      await fetch(`${SUPABASE_URL}/rest/v1/recordings?share_id=eq.${encodeURIComponent(recordId)}`, {
         method: 'PATCH',
         headers: {
           Authorization: `Bearer ${SUPABASE_SERVICE}`,
@@ -1460,55 +1434,25 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
         body: JSON.stringify({ title }),
       }).catch(() => {});
     } else {
-      // ── Raw file upload ───────────────────────────────────
+      // ── Raw file upload — stream via main process (no RAM overhead) ───
       recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      objectPath = `${user_id}/${recordId}.webm`;
-
-      statusEl.textContent = 'Reading file…';
+      statusEl.textContent = 'Uploading…';
       pfill.style.width = '5%';
       const fileSize = await window.api.getFileSize(currentFilePath);
       if (!fileSize) throw new Error('Could not read recording file');
       const fileSizeMB = (fileSize / 1024 / 1024).toFixed(1);
-
-      // Use TUS resumable upload — supports files of any size by chunking into 6MB pieces
-      await tusUpload(currentFilePath, fileSize, objectPath, (pct, sent) => {
-        pfill.style.width = (5 + pct * 0.85) + '%';
+      const result = await blobUploadFilePath(currentFilePath, user_id, title, duration, (pct, sent) => {
+        pfill.style.width = (5 + pct * 0.9) + '%';
         statusEl.textContent = `Uploading ${sent}MB / ${fileSizeMB}MB (${Math.round(pct)}%)`;
       });
-      pfill.style.width = '90%';
-
+      recordId = result.recordId;
       pfill.style.width = '95%';
-      statusEl.textContent = 'Saving…';
-      const insRes = await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${SUPABASE_SERVICE}`,
-          apikey: SUPABASE_SERVICE,
-          'Content-Type': 'application/json',
-          Prefer: 'return=minimal',
-        },
-        body: JSON.stringify({
-          user_id:        user_id,
-          share_id:       recordId,
-          title:          title,
-          duration:       Math.round(duration || 0),
-          file_size:      fileSize,
-          mime_type:      'video/webm',
-          storage_path:   objectPath,
-          status:         'ready',
-          recording_mode: 'screen',
-          is_public:      true,
-        }),
-      });
-      if (!insRes.ok) {
-        const e = await insRes.json().catch(() => ({}));
-        throw new Error(e.message || e.error || `DB insert failed: ${insRes.status}`);
-      }
     }
 
     // ── 5. Build share URL ────────────────────────────────
     statusEl.textContent = 'Finalizing…';
-    const publicUrl = `${APP_URL}/watch/${recordId}`;
+    const publicUrl = _autoUploadedStoragePath ||
+      `${SUPABASE_URL}/storage/v1/object/public/recordings/${user_id}/${recordId}.webm`;
 
     pfill.style.width = '100%';
     progWrap.style.display = 'none';

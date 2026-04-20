@@ -56,12 +56,21 @@ contextBridge.exposeInMainWorld('api', {
   getUserSession:     ()       => ipcRenderer.invoke('get-user-session'),
   userLogout:         ()       => ipcRenderer.invoke('user-logout'),
 
+  // Storage upload (main-process streaming — no large buffers in renderer)
+  uploadRecording:    (opts)   => ipcRenderer.invoke('upload-recording', opts),
+  uploadBlobBegin:    ()       => ipcRenderer.invoke('upload-blob-begin'),
+  uploadBlobChunk:    (buf)    => ipcRenderer.invoke('upload-blob-chunk', buf),
+  uploadBlobFinish:   (opts)   => ipcRenderer.invoke('upload-blob-finish-exec', opts),
+
   // Editor
   readFile:           (fp)     => ipcRenderer.invoke('read-file', fp),
   getDeviceSession:   ()       => ipcRenderer.invoke('get-device-session'),
   openExistingFile:   ()       => ipcRenderer.invoke('open-existing-file'),
   listRecordings:     ()       => ipcRenderer.invoke('list-recordings'),
   openRecordingFile:  (fp)     => ipcRenderer.invoke('open-recording-file', fp),
+  blobUpload:         (opts)   => ipcRenderer.invoke('blob-upload', opts),
+  blobUploadBuffer:   (opts)   => ipcRenderer.invoke('blob-upload-buffer', opts),
+  onBlobUploadProgress: (cb)   => ipcRenderer.on('blob-upload-progress', (_, d) => cb(d)),
   getFileSize:        (fp)     => ipcRenderer.invoke('get-file-size', fp),
   readFileChunk:      (fp, s, l) => ipcRenderer.invoke('read-file-chunk', fp, s, l),
   exportVideo:        (data)   => ipcRenderer.invoke('export-video', data),

@@ -4,9 +4,12 @@ const fs    = require('fs');
 const os    = require('os');
 const https = require('https');
 
-// ── Auto-upload session (persisted across app restarts) ────
+// ── Supabase config ────────────────────────────────────────
 const SUPABASE_URL  = 'https://bgsvuywxejpmkstgqizq.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2MDc0MzMsImV4cCI6MjA4NzE4MzQzM30.EvHOy5sBbXzSxjRS5vPGzm8cnFrOXxDfclP-ru3VU_M';
+const PROJECT_REF   = 'bgsvuywxejpmkstgqizq';
+const MGMT_KEY      = '9f5c5772-2f35-44e7-8597-4ceb4b783300';
+let _serviceKey     = null;
 let _deviceSession = null;
 
 function deviceFilePath() {
@@ -166,16 +169,163 @@ function createEditor(filePath) {
   });
 }
 
+// ── Storage setup ──────────────────────────────────────────
+async function initStorage() {
+  try {
+    // Fetch service role key from Supabase Management API
+    const r = await fetch(`https://api.supabase.com/v1/projects/${PROJECT_REF}/api-keys`, {
+      headers: { Authorization: `Bearer ${MGMT_KEY}` },
+    });
+    if (r.ok) {
+      const keys = await r.json();
+      const srk = keys.find(k => k.name === 'service_role');
+      if (srk?.api_key) _serviceKey = srk.api_key;
+    }
+  } catch {}
+
+  if (!_serviceKey) return;
+
+  // Ensure recordings bucket exists (ignore error if already exists)
+  await fetch(`${SUPABASE_URL}/storage/v1/bucket`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${_serviceKey}`,
+      apikey: _serviceKey,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ id: 'recordings', name: 'recordings', public: true, fileSizeLimit: null }),
+  }).catch(() => {});
+}
+
+// Stream a file to Supabase Storage using service role key
+async function uploadFileToStorage(filePath, objectPath, onProgress) {
+  const token = _serviceKey || (_userSession?.access_token);
+  if (!token) throw new Error('No upload credentials available');
+  const fileSize = fs.statSync(filePath).size;
+  const host = new URL(SUPABASE_URL).hostname;
+
+  await new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: host,
+      path: `/storage/v1/object/recordings/${objectPath}`,
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        apikey: _serviceKey || SUPABASE_ANON,
+        'Content-Type': 'video/webm',
+        'Content-Length': fileSize,
+        'x-upsert': 'true',
+      },
+    }, res => {
+      let d = '';
+      res.on('data', c => d += c);
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) resolve();
+        else reject(new Error(`Storage upload failed (${res.statusCode}): ${d}`));
+      });
+    });
+    req.on('error', reject);
+
+    let sent = 0;
+    const stream = fs.createReadStream(filePath);
+    stream.on('data', chunk => {
+      sent += chunk.length;
+      if (onProgress) onProgress(Math.round((sent / fileSize) * 100));
+    });
+    stream.pipe(req);
+  });
+
+  return `${SUPABASE_URL}/storage/v1/object/public/recordings/${objectPath}`;
+}
+
 // ── App ready ──────────────────────────────────────────────
 app.whenReady().then(async () => {
   loadDeviceSession();
   loadUserSession();
   ensureDeviceSession().catch(() => {});
+  initStorage().catch(() => {});
 
   createPicker();
   app.on('activate', () => { if (!pickerWin) createPicker(); });
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+
+// ── IPC: storage upload ────────────────────────────────────
+ipcMain.handle('upload-recording', async (_, { filePath, userId, recordId, title, duration }) => {
+  try {
+    const objectPath = `${userId}/${recordId}.webm`;
+    const url = await uploadFileToStorage(filePath, objectPath, null);
+
+    // Insert DB row (best-effort)
+    const token = _serviceKey || (_userSession?.access_token);
+    if (token) {
+      await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          apikey: _serviceKey || SUPABASE_ANON,
+          'Content-Type': 'application/json',
+          Prefer: 'return=minimal',
+        },
+        body: JSON.stringify({
+          share_id: recordId,
+          user_id: userId,
+          title: title || 'Recording',
+          duration_s: Math.round(duration || 0),
+          storage_path: `recordings/${objectPath}`,
+        }),
+      }).catch(() => {});
+    }
+
+    return { ok: true, url };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+// Blob upload: renderer writes chunks here then calls finish
+let _blobUploadTmpPath = null;
+ipcMain.handle('upload-blob-begin', () => {
+  _blobUploadTmpPath = path.join(os.tmpdir(), `br-blob-${Date.now()}.webm`);
+  fs.writeFileSync(_blobUploadTmpPath, Buffer.alloc(0));
+  return _blobUploadTmpPath;
+});
+ipcMain.handle('upload-blob-chunk', (_, arrayBuf) => {
+  if (!_blobUploadTmpPath) return;
+  fs.appendFileSync(_blobUploadTmpPath, Buffer.from(arrayBuf));
+});
+ipcMain.handle('upload-blob-finish', async (_, { userId, recordId, title, duration }) => {
+  const filePath = _blobUploadTmpPath;
+  _blobUploadTmpPath = null;
+  if (!filePath || !fs.existsSync(filePath)) return { ok: false, error: 'No blob data' };
+  const result = await ipcMain.emit('upload-recording-internal', { filePath, userId, recordId, title, duration });
+  try { fs.unlinkSync(filePath); } catch {}
+  return result;
+});
+
+// Internal helper used by upload-blob-finish
+ipcMain.handle('upload-blob-finish-exec', async (_, { userId, recordId, title, duration }) => {
+  const filePath = _blobUploadTmpPath;
+  _blobUploadTmpPath = null;
+  if (!filePath || !fs.existsSync(filePath)) return { ok: false, error: 'No blob data' };
+  try {
+    const objectPath = `${userId}/${recordId}.webm`;
+    const url = await uploadFileToStorage(filePath, objectPath, null);
+    const token = _serviceKey || (_userSession?.access_token);
+    if (token) {
+      await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}`, apikey: _serviceKey || SUPABASE_ANON, 'Content-Type': 'application/json', Prefer: 'return=minimal' },
+        body: JSON.stringify({ share_id: recordId, user_id: userId, title: title || 'Recording', duration_s: Math.round(duration || 0), storage_path: `recordings/${objectPath}` }),
+      }).catch(() => {});
+    }
+    return { ok: true, url };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    try { fs.unlinkSync(filePath); } catch {}
+  }
+});
 
 // ── IPC: sources ──────────────────────────────────────────
 ipcMain.handle('get-sources', async () => {

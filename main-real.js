@@ -207,9 +207,15 @@ app.whenReady().then(async () => {
   loadUserSession();
   ensureDeviceSession().catch(() => {});
 
-  // Request mic permission on first launch so recordings have audio
-  if (systemPreferences.getMediaAccessStatus('microphone') !== 'granted') {
-    systemPreferences.askForMediaAccess('microphone').catch(() => {});
+  // Request mic permission — if denied or not granted, trigger a fresh ask + open settings
+  const micStatus = systemPreferences.getMediaAccessStatus('microphone');
+  if (micStatus !== 'granted') {
+    const granted = await systemPreferences.askForMediaAccess('microphone').catch(() => false);
+    if (!granted) {
+      // User denied or was never prompted — open System Settings to Microphone
+      const { shell } = require('electron');
+      shell.openExternal('x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone');
+    }
   }
 
   createPicker();
@@ -340,6 +346,76 @@ ipcMain.handle('save-temp', async (_, arrayBuf) => {
 ipcMain.on('pick-recording', (_, filePath) => {
   pickerWin?.hide();
   createEditor(filePath);
+});
+
+// ── Vercel Blob upload (runs in main process Node.js) ─────
+ipcMain.handle('blob-upload', async (event, { filePath, userId, title, duration }) => {
+  const { upload } = require('@vercel/blob/client');
+  const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const pathname = `recordings/${userId}/${recordId}.webm`;
+
+  const buf = fs.readFileSync(filePath);
+  const blobData = new Blob([buf], { type: 'video/webm' });
+
+  try {
+    const result = await upload(pathname, blobData, {
+      access: 'public',
+      handleUploadUrl: 'https://screencast-eight.vercel.app/api/blob-upload',
+      contentType: 'video/webm',
+      multipart: true,
+      clientPayload: JSON.stringify({
+        recordingId: recordId,
+        userId,
+        title,
+        duration: Math.round(duration || 0),
+        fileSize: blobData.size,
+      }),
+      onUploadProgress: (e) => {
+        event.sender.send('blob-upload-progress', {
+          percentage: e.percentage,
+          loaded: e.loaded,
+          total: e.total,
+        });
+      },
+    });
+    return { ok: true, url: result.url, recordId, fileSize: blobData.size };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+});
+
+ipcMain.handle('blob-upload-buffer', async (event, { buffer, userId, title, duration }) => {
+  const { upload } = require('@vercel/blob/client');
+  const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const pathname = `recordings/${userId}/${recordId}.webm`;
+
+  const blobData = new Blob([Buffer.from(buffer)], { type: 'video/webm' });
+
+  try {
+    const result = await upload(pathname, blobData, {
+      access: 'public',
+      handleUploadUrl: 'https://screencast-eight.vercel.app/api/blob-upload',
+      contentType: 'video/webm',
+      multipart: true,
+      clientPayload: JSON.stringify({
+        recordingId: recordId,
+        userId,
+        title,
+        duration: Math.round(duration || 0),
+        fileSize: blobData.size,
+      }),
+      onUploadProgress: (e) => {
+        event.sender.send('blob-upload-progress', {
+          percentage: e.percentage,
+          loaded: e.loaded,
+          total: e.total,
+        });
+      },
+    });
+    return { ok: true, url: result.url, recordId, fileSize: blobData.size };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
 });
 
 ipcMain.handle('list-recordings', async () => {

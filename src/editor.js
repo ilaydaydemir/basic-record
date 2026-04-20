@@ -957,8 +957,8 @@ async function runProcessedUpload(title, accessToken, userId, onProgress) {
     const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${objectPath}`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${accessToken}`,
-        apikey: SUPABASE_ANON,
+        Authorization: `Bearer ${SUPABASE_SERVICE}`,
+        apikey: SUPABASE_SERVICE,
         'Content-Type': mimeType,
         'x-upsert': 'true',
       },
@@ -970,11 +970,11 @@ async function runProcessedUpload(title, accessToken, userId, onProgress) {
     }
 
     onProgress(95);
-    await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+    const pInsRes = await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${accessToken}`,
-        apikey: SUPABASE_ANON,
+        Authorization: `Bearer ${SUPABASE_SERVICE}`,
+        apikey: SUPABASE_SERVICE,
         'Content-Type': 'application/json',
         Prefer: 'return=minimal',
       },
@@ -991,6 +991,10 @@ async function runProcessedUpload(title, accessToken, userId, onProgress) {
         is_public:      true,
       }),
     });
+    if (!pInsRes.ok) {
+      const err = await pInsRes.json().catch(() => ({}));
+      throw new Error(err.message || err.error || `DB insert failed: ${pInsRes.status}`);
+    }
 
     onProgress(100);
     return recordId;
@@ -1044,6 +1048,8 @@ document.getElementById('back-btn').addEventListener('click', () => {
 const SUPABASE_URL  = 'https://bgsvuywxejpmkstgqizq.supabase.co';
 
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2MDc0MzMsImV4cCI6MjA4NzE4MzQzM30.EvHOy5sBbXzSxjRS5vPGzm8cnFrOXxDfclP-ru3VU_M';
+// Service role key — bypasses RLS; injected at patch time, never committed to git
+const SUPABASE_SERVICE = '__SUPABASE_SERVICE_KEY__';
 const APP_URL       = 'https://screencast-eight.vercel.app';
 const CHUNK_SIZE    = 8 * 1024 * 1024; // 8 MB per chunk
 
@@ -1139,41 +1145,35 @@ async function autoUpload() {
     const fileSize = await window.api.getFileSize(currentFilePath);
     if (!fileSize) { _auError('Could not read recording file'); return; }
 
-    // 3. Upload in chunks
-    const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * CHUNK_SIZE;
-      const len   = Math.min(CHUNK_SIZE, fileSize - start);
-      const chunk = await window.api.readFileChunk(currentFilePath, start, len);
-      if (!chunk) { _auError(`Could not read chunk ${i}`); return; }
+    // 3. Read entire file and upload in one shot (Supabase storage doesn't support Content-Range multipart)
+    _auShow('uploading', 'Reading file…', 10);
+    const fullBuf = await window.api.readFileChunk(currentFilePath, 0, fileSize);
+    if (!fullBuf) { _auError('Could not read file'); return; }
 
-      const pct = Math.round(5 + ((i + 1) / totalChunks) * 90);
-      _auShow('uploading', `Uploading… ${pct}%`, pct);
-
-      const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${objectPath}`, {
-        method: i === 0 ? 'POST' : 'PUT',
-        headers: {
-          Authorization: `Bearer ${access_token}`,
-          apikey: SUPABASE_ANON,
-          'Content-Type': 'application/octet-stream',
-          'x-upsert': 'true',
-          'Content-Range': `bytes ${start}-${start + len - 1}/${fileSize}`,
-        },
-        body: chunk,
-      });
-      if (!upRes.ok) {
-        const e = await upRes.json().catch(() => ({}));
-        _auError(e.message || e.error || `chunk ${i} failed`);
-        return;
-      }
-    }
-
-    // 4. Save metadata to recordings table → appears in Vercel dashboard
-    await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+    _auShow('uploading', 'Uploading…', 30);
+    const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${objectPath}`, {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${access_token}`,
-        apikey: SUPABASE_ANON,
+        Authorization: `Bearer ${SUPABASE_SERVICE}`,
+        apikey: SUPABASE_SERVICE,
+        'Content-Type': 'video/webm',
+        'x-upsert': 'true',
+      },
+      body: fullBuf,
+    });
+    if (!upRes.ok) {
+      const e = await upRes.json().catch(() => ({}));
+      _auError(e.message || e.error || `Storage upload failed (${upRes.status})`);
+      return;
+    }
+    _auShow('uploading', 'Saving…', 90);
+
+    // 4. Save metadata to recordings table → appears in Vercel dashboard
+    const autoInsRes = await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${SUPABASE_SERVICE}`,
+        apikey: SUPABASE_SERVICE,
         'Content-Type': 'application/json',
         Prefer: 'return=minimal',
       },
@@ -1189,7 +1189,13 @@ async function autoUpload() {
         recording_mode: 'screen',
         is_public:      true,
       }),
-    }).catch(() => {}); // non-critical — don't block share link
+    });
+    if (!autoInsRes.ok) {
+      const err = await autoInsRes.json().catch(() => ({}));
+      console.error('autoUpload INSERT failed:', err);
+      _auError(err.message || err.error || `DB insert failed (${autoInsRes.status})`);
+      return;
+    }
 
     // 5. Done — show Share button
     _autoUploadedStoragePath = objectPath; // mark so manual upload skips duplicate INSERT
@@ -1342,8 +1348,8 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
       await fetch(`${SUPABASE_URL}/rest/v1/recordings?storage_path=eq.${encodeURIComponent(objectPath)}`, {
         method: 'PATCH',
         headers: {
-          Authorization: `Bearer ${access_token}`,
-          apikey: SUPABASE_ANON,
+          Authorization: `Bearer ${SUPABASE_SERVICE}`,
+          apikey: SUPABASE_SERVICE,
           'Content-Type': 'application/json',
           Prefer: 'return=minimal',
         },
@@ -1354,45 +1360,41 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
       recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       objectPath = `${user_id}/${recordId}.webm`;
 
-      statusEl.textContent = 'Preparing…';
+      statusEl.textContent = 'Reading file…';
       pfill.style.width = '5%';
       const fileSize = await window.api.getFileSize(currentFilePath);
       if (!fileSize) throw new Error('Could not read recording file');
 
-      const totalChunks = Math.ceil(fileSize / CHUNK_SIZE);
-      for (let i = 0; i < totalChunks; i++) {
-        const start  = i * CHUNK_SIZE;
-        const len    = Math.min(CHUNK_SIZE, fileSize - start);
-        const chunk  = await window.api.readFileChunk(currentFilePath, start, len);
-        if (!chunk) throw new Error(`Could not read chunk ${i}`);
+      const fullBuf = await window.api.readFileChunk(currentFilePath, 0, fileSize);
+      if (!fullBuf) throw new Error('Could not read file');
 
-        statusEl.textContent = `Uploading… ${i + 1}/${totalChunks}`;
-        pfill.style.width = (5 + ((i + 1) / totalChunks) * 85) + '%';
-
+      statusEl.textContent = 'Uploading…';
+      pfill.style.width = '30%';
+      {
         const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${objectPath}`, {
-          method: i === 0 ? 'POST' : 'PUT',
+          method: 'POST',
           headers: {
-            Authorization: `Bearer ${access_token}`,
-            apikey: SUPABASE_ANON,
-            'Content-Type': 'application/octet-stream',
+            Authorization: `Bearer ${SUPABASE_SERVICE}`,
+            apikey: SUPABASE_SERVICE,
+            'Content-Type': 'video/webm',
             'x-upsert': 'true',
-            'Content-Range': `bytes ${start}-${start + len - 1}/${fileSize}`,
           },
-          body: chunk,
+          body: fullBuf,
         });
+        pfill.style.width = '85%';
         if (!upRes.ok) {
           const e = await upRes.json().catch(() => ({}));
-          throw new Error(e.message || e.error || `Upload failed at chunk ${i}`);
+          throw new Error(e.message || e.error || `Upload failed (${upRes.status})`);
         }
       }
 
       pfill.style.width = '95%';
       statusEl.textContent = 'Saving…';
-      await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+      const insRes = await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${access_token}`,
-          apikey: SUPABASE_ANON,
+          Authorization: `Bearer ${SUPABASE_SERVICE}`,
+          apikey: SUPABASE_SERVICE,
           'Content-Type': 'application/json',
           Prefer: 'return=minimal',
         },
@@ -1408,7 +1410,11 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
           recording_mode: 'screen',
           is_public:      true,
         }),
-      }).catch(() => {});
+      });
+      if (!insRes.ok) {
+        const e = await insRes.json().catch(() => ({}));
+        throw new Error(e.message || e.error || `DB insert failed: ${insRes.status}`);
+      }
     }
 
     // ── 5. Build share URL ────────────────────────────────

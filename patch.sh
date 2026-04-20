@@ -17,7 +17,7 @@ set -e
 
 APP="/Applications/Basic Record.app"
 ASAR="$APP/Contents/Resources/app.asar"
-USERDATA="$HOME/Library/Application Support/Basic Record"
+USERDATA="$HOME/Library/Application Support/basic-record"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # ── Check whether loader.js is already installed in the bundle ──────────────
@@ -33,13 +33,21 @@ if [ "$LOADER_INSTALLED" = "true" ]; then
   # ── Fast path: loader already in bundle — just update userData override ────
   echo "→ loader.js detected in bundle — updating userData override only (no re-sign needed)…"
   mkdir -p "$USERDATA/src"
+
+  # Read service key from .env.local (gitignored) for injection
+  if [ -f "$SCRIPT_DIR/.env.local" ]; then
+    SERVICE_KEY=$(grep -E "^SUPABASE_SERVICE_KEY=" "$SCRIPT_DIR/.env.local" | cut -d= -f2-)
+  fi
+  SERVICE_KEY="${SERVICE_KEY:-sb_secret_PLACEHOLDER}"
+
   cp "$SCRIPT_DIR/main-real.js"      "$USERDATA/main-override.js"
   cp "$SCRIPT_DIR/preload.js"        "$USERDATA/preload.js"
-  cp "$SCRIPT_DIR/src/editor.js"     "$USERDATA/editor-override.js"
   cp "$SCRIPT_DIR/src/picker.html"   "$USERDATA/src/picker.html"
   cp "$SCRIPT_DIR/src/picker.js"     "$USERDATA/src/picker.js"
   cp "$SCRIPT_DIR/src/editor.html"   "$USERDATA/src/editor.html"
-  cp "$SCRIPT_DIR/src/editor.js"     "$USERDATA/src/editor.js"
+  # Inject service key into editor.js
+  sed "s|__SUPABASE_SERVICE_KEY__|$SERVICE_KEY|g" "$SCRIPT_DIR/src/editor.js" > "$USERDATA/src/editor.js"
+  cp "$USERDATA/src/editor.js"       "$USERDATA/editor-override.js"
   echo "✓ Done — main-override.js written to:"
   echo "  $USERDATA/main-override.js"
   echo ""

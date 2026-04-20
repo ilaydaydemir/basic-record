@@ -953,21 +953,11 @@ async function runProcessedUpload(title, accessToken, userId, onProgress) {
     const recordId  = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const objectPath = `${userId}/${recordId}.webm`;
 
+    // Upload blob via TUS (chunked) to avoid 50MB single-request limit
     onProgress(82);
-    const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${objectPath}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${SUPABASE_SERVICE}`,
-        apikey: SUPABASE_SERVICE,
-        'Content-Type': mimeType,
-        'x-upsert': 'true',
-      },
-      body: blob,
+    await tusUploadBlob(blob, objectPath, (pct) => {
+      onProgress(82 + pct * 0.13); // 82 → 95
     });
-    if (!upRes.ok) {
-      const e = await upRes.json().catch(() => ({}));
-      throw new Error(e.message || e.error || 'Storage upload failed');
-    }
 
     onProgress(95);
     const pInsRes = await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
@@ -1050,6 +1040,130 @@ const SUPABASE_URL  = 'https://bgsvuywxejpmkstgqizq.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2MDc0MzMsImV4cCI6MjA4NzE4MzQzM30.EvHOy5sBbXzSxjRS5vPGzm8cnFrOXxDfclP-ru3VU_M';
 // Service role key — bypasses RLS; injected at patch time, never committed to git
 const SUPABASE_SERVICE = '__SUPABASE_SERVICE_KEY__';
+
+// TUS upload for a Blob (used by runProcessedUpload after canvas rendering)
+async function tusUploadBlob(blob, objectPath, onProgress) {
+  const fileSize = blob.size;
+  const endpoint = `${SUPABASE_URL}/storage/v1/upload/resumable`;
+  const base64 = (s) => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+  const metadata = [
+    `bucketName ${base64('recordings')}`,
+    `objectName ${base64(objectPath)}`,
+    `contentType ${base64(blob.type || 'video/webm')}`,
+    `cacheControl ${base64('max-age=3600')}`,
+  ].join(',');
+
+  const createRes = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${SUPABASE_SERVICE}`,
+      'x-upsert': 'true',
+      'Tus-Resumable': '1.0.0',
+      'Upload-Length': String(fileSize),
+      'Upload-Metadata': metadata,
+    },
+  });
+  if (!createRes.ok && createRes.status !== 201) {
+    const t = await createRes.text().catch(() => '');
+    throw new Error(`TUS create failed (${createRes.status}): ${t}`);
+  }
+  const uploadUrl = createRes.headers.get('location');
+  if (!uploadUrl) throw new Error('TUS: no location header');
+
+  const CHUNK_SZ = 6 * 1024 * 1024;
+  let offset = 0;
+  while (offset < fileSize) {
+    const len = Math.min(CHUNK_SZ, fileSize - offset);
+    const chunk = blob.slice(offset, offset + len);
+
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PATCH', uploadUrl);
+      xhr.setRequestHeader('Authorization', `Bearer ${SUPABASE_SERVICE}`);
+      xhr.setRequestHeader('Tus-Resumable', '1.0.0');
+      xhr.setRequestHeader('Upload-Offset', String(offset));
+      xhr.setRequestHeader('Content-Type', 'application/offset+octet-stream');
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(((offset + e.loaded) / fileSize) * 100);
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`TUS chunk failed (${xhr.status})`));
+      };
+      xhr.onerror = () => reject(new Error('TUS network error'));
+      xhr.send(chunk);
+    });
+    offset += len;
+  }
+}
+
+// TUS resumable upload — chunks the file into 6MB pieces, works for files of any size
+async function tusUpload(filePath, fileSize, objectPath, onProgress) {
+  const endpoint = `${SUPABASE_URL}/storage/v1/upload/resumable`;
+  const authHeaders = {
+    Authorization: `Bearer ${SUPABASE_SERVICE}`,
+    'x-upsert': 'true',
+  };
+
+  // 1. Create upload
+  const base64 = (s) => btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+  const metadata = [
+    `bucketName ${base64('recordings')}`,
+    `objectName ${base64(objectPath)}`,
+    `contentType ${base64('video/webm')}`,
+    `cacheControl ${base64('max-age=3600')}`,
+  ].join(',');
+
+  const createRes = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      ...authHeaders,
+      'Tus-Resumable': '1.0.0',
+      'Upload-Length': String(fileSize),
+      'Upload-Metadata': metadata,
+    },
+  });
+  if (!createRes.ok && createRes.status !== 201) {
+    const t = await createRes.text().catch(() => '');
+    throw new Error(`TUS create failed (${createRes.status}): ${t}`);
+  }
+  const uploadUrl = createRes.headers.get('location');
+  if (!uploadUrl) throw new Error('TUS: no location header');
+
+  // 2. Upload chunks
+  const CHUNK_SZ = 6 * 1024 * 1024; // 6MB — below free-plan 50MB limit
+  let offset = 0;
+  while (offset < fileSize) {
+    const len = Math.min(CHUNK_SZ, fileSize - offset);
+    const chunk = await window.api.readFileChunk(filePath, offset, len);
+    if (!chunk) throw new Error(`Failed reading at offset ${offset}`);
+
+    await new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open('PATCH', uploadUrl);
+      xhr.setRequestHeader('Authorization', `Bearer ${SUPABASE_SERVICE}`);
+      xhr.setRequestHeader('Tus-Resumable', '1.0.0');
+      xhr.setRequestHeader('Upload-Offset', String(offset));
+      xhr.setRequestHeader('Content-Type', 'application/offset+octet-stream');
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) {
+          const total = offset + e.loaded;
+          const pct = (total / fileSize) * 100;
+          const sentMB = (total / 1024 / 1024).toFixed(1);
+          onProgress(pct, sentMB);
+        }
+      };
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) resolve();
+        else reject(new Error(`TUS chunk failed (${xhr.status}): ${xhr.responseText}`));
+      };
+      xhr.onerror = () => reject(new Error('TUS network error'));
+      xhr.send(chunk);
+    });
+
+    offset += len;
+  }
+}
 const APP_URL       = 'https://screencast-eight.vercel.app';
 const CHUNK_SIZE    = 8 * 1024 * 1024; // 8 MB per chunk
 
@@ -1145,25 +1259,15 @@ async function autoUpload() {
     const fileSize = await window.api.getFileSize(currentFilePath);
     if (!fileSize) { _auError('Could not read recording file'); return; }
 
-    // 3. Read entire file and upload in one shot (Supabase storage doesn't support Content-Range multipart)
-    _auShow('uploading', 'Reading file…', 10);
-    const fullBuf = await window.api.readFileChunk(currentFilePath, 0, fileSize);
-    if (!fullBuf) { _auError('Could not read file'); return; }
-
-    _auShow('uploading', 'Uploading…', 30);
-    const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${objectPath}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${SUPABASE_SERVICE}`,
-        apikey: SUPABASE_SERVICE,
-        'Content-Type': 'video/webm',
-        'x-upsert': 'true',
-      },
-      body: fullBuf,
-    });
-    if (!upRes.ok) {
-      const e = await upRes.json().catch(() => ({}));
-      _auError(e.message || e.error || `Storage upload failed (${upRes.status})`);
+    // 3. Upload via TUS resumable (works for any file size)
+    const fileSizeMB = (fileSize / 1024 / 1024).toFixed(1);
+    _auShow('uploading', `Uploading 0MB / ${fileSizeMB}MB`, 5);
+    try {
+      await tusUpload(currentFilePath, fileSize, objectPath, (pct, sent) => {
+        _auShow('uploading', `Uploading ${sent}MB / ${fileSizeMB}MB (${Math.round(pct)}%)`, 5 + pct * 0.85);
+      });
+    } catch (e) {
+      _auError(e.message || 'Upload failed');
       return;
     }
     _auShow('uploading', 'Saving…', 90);
@@ -1364,29 +1468,14 @@ document.getElementById('upload-go-btn').addEventListener('click', async () => {
       pfill.style.width = '5%';
       const fileSize = await window.api.getFileSize(currentFilePath);
       if (!fileSize) throw new Error('Could not read recording file');
+      const fileSizeMB = (fileSize / 1024 / 1024).toFixed(1);
 
-      const fullBuf = await window.api.readFileChunk(currentFilePath, 0, fileSize);
-      if (!fullBuf) throw new Error('Could not read file');
-
-      statusEl.textContent = 'Uploading…';
-      pfill.style.width = '30%';
-      {
-        const upRes = await fetch(`${SUPABASE_URL}/storage/v1/object/recordings/${objectPath}`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${SUPABASE_SERVICE}`,
-            apikey: SUPABASE_SERVICE,
-            'Content-Type': 'video/webm',
-            'x-upsert': 'true',
-          },
-          body: fullBuf,
-        });
-        pfill.style.width = '85%';
-        if (!upRes.ok) {
-          const e = await upRes.json().catch(() => ({}));
-          throw new Error(e.message || e.error || `Upload failed (${upRes.status})`);
-        }
-      }
+      // Use TUS resumable upload — supports files of any size by chunking into 6MB pieces
+      await tusUpload(currentFilePath, fileSize, objectPath, (pct, sent) => {
+        pfill.style.width = (5 + pct * 0.85) + '%';
+        statusEl.textContent = `Uploading ${sent}MB / ${fileSizeMB}MB (${Math.round(pct)}%)`;
+      });
+      pfill.style.width = '90%';
 
       pfill.style.width = '95%';
       statusEl.textContent = 'Saving…';

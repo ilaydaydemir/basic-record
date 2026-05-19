@@ -1032,6 +1032,38 @@ const SUPABASE_URL  = 'https://bgsvuywxejpmkstgqizq.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2MDc0MzMsImV4cCI6MjA4NzE4MzQzM30.EvHOy5sBbXzSxjRS5vPGzm8cnFrOXxDfclP-ru3VU_M';
 const SUPABASE_SERVICE = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3MTYwNzQzMywiZXhwIjoyMDg3MTgzNDMzfQ.9uigqyXaCI1xvmTGMK9BVjC9rEdvswms502-Z_M2R54';
 // Upload raw file via TUS (reads chunks with existing readFileChunk IPC — no new handler needed)
+// Insert a row into `recordings` so the upload appears on the dashboard.
+// Pre-TUS migration this was handled by a Vercel Blob `onUploadCompleted`
+// webhook on /api/blob-upload, but that route doesn't exist in screencast.
+// We do it client-side now using the service key.
+async function createRecordingRow({ userId, title, duration, fileSize, storagePath }) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/recordings`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${SUPABASE_SERVICE}`,
+      apikey: SUPABASE_SERVICE,
+      'Content-Type': 'application/json',
+      Prefer: 'return=representation',
+    },
+    body: JSON.stringify({
+      user_id: userId,
+      title,
+      duration: Math.round(duration || 0),
+      file_size: fileSize,
+      mime_type: 'video/webm',
+      storage_path: storagePath,
+      status: 'ready',
+      recording_mode: 'screen',
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(() => '');
+    throw new Error(`DB insert failed (${res.status}): ${t}`);
+  }
+  const rows = await res.json();
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
 async function blobUploadFilePath(filePath, userId, title, duration, onProgress) {
   const recordId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const fileSize = await window.api.getFileSize(filePath);
@@ -1039,13 +1071,21 @@ async function blobUploadFilePath(filePath, userId, title, duration, onProgress)
   const objectPath = `${userId}/${recordId}.webm`;
   await tusUpload(filePath, fileSize, objectPath, onProgress);
   const url = `${SUPABASE_URL}/storage/v1/object/public/recordings/${objectPath}`;
-  return { ok: true, url, recordId };
+  const row = await createRecordingRow({ userId, title, duration, fileSize, storagePath: objectPath });
+  return { ok: true, url, recordId, row };
 }
 
 // Upload a rendered Blob via TUS (uses SUPABASE_SERVICE key directly from renderer)
 async function blobUploadBlob(blobData, recordId, userId, title, duration, onProgress) {
   const objectPath = `${userId}/${recordId}.webm`;
   await tusUploadBlob(blobData, objectPath, onProgress);
+  await createRecordingRow({
+    userId,
+    title,
+    duration,
+    fileSize: blobData.size,
+    storagePath: objectPath,
+  });
   return `${SUPABASE_URL}/storage/v1/object/public/recordings/${objectPath}`;
 }
 

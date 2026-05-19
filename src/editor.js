@@ -52,13 +52,22 @@ let _autoUploadedStoragePath = null; // set when autoUpload succeeds; prevents d
 let _autoUploadedRecordId = null;
 let _autoUploadInProgress = false;   // guard against duplicate concurrent autoUploads
 
+// Resolves once `duration` has been populated for the currently-loaded video.
+// autoUpload() awaits this so the WebM scan trick finishes before the upload
+// payload is built — otherwise duration=0 is sent and the DB row shows 0:00.
+let _resolveDurationReady;
+let _durationReady = new Promise(r => { _resolveDurationReady = r; });
+
 // ── Load video ────────────────────────────────────────────
 window.api.onLoadVideo(fp => {
   currentFilePath = fp;
   _autoUploadedStoragePath = null; // reset on every new video
+  duration = 0;
+  _durationReady = new Promise(r => { _resolveDurationReady = r; });
   video.src = `file://${fp}`;
   video.load();
-  // Start background upload if session exists
+  // Start background upload if session exists. autoUpload awaits _durationReady
+  // internally, so this kicks the flow off without blocking duration discovery.
   autoUpload();
 });
 
@@ -75,6 +84,7 @@ video.addEventListener('loadedmetadata', () => {
       resizeCanvases();
       drawTimeline();
       updateTimeDisplay();
+      _resolveDurationReady();
     });
   } else {
     duration = video.duration;
@@ -83,6 +93,7 @@ video.addEventListener('loadedmetadata', () => {
     resizeCanvases();
     drawTimeline();
     updateTimeDisplay();
+    _resolveDurationReady();
   }
 });
 
@@ -1207,6 +1218,10 @@ async function autoUpload() {
   if (!currentFilePath) return;
   if (_autoUploadInProgress) return;
   _autoUploadInProgress = true;
+  // Block until the WebM duration scan trick has populated `duration`. Without
+  // this, the upload payload sends duration=0 and the recording renders as
+  // "0:00" on the watch page.
+  await _durationReady;
   // Always prefer a fresh session from the main process
   const freshSession = await window.api.getUserSession().catch(() => null);
   if (freshSession && freshSession.access_token) {

@@ -4,6 +4,17 @@ const fs    = require('fs');
 const os    = require('os');
 const https = require('https');
 
+// ── Keep the hidden recorder window's renderer at full speed ──────────────
+// backgroundThrottling:false (set on the recorder window) stops timer/rAF
+// throttling, but Chromium ALSO lowers the priority of a backgrounded /
+// occluded renderer process after a few minutes, which stalls the desktop
+// capture <video> + canvas.captureStream and turns the recording black mid-way.
+// These app-level switches (must run before app-ready) disable that renderer
+// backgrounding entirely, so long recordings never go black.
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+
 // ── Auto-upload session (persisted across app restarts) ────
 const SUPABASE_URL  = 'https://bgsvuywxejpmkstgqizq.supabase.co';
 const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImJnc3Z1eXd4ZWpwbWtzdGdxaXpxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzE2MDc0MzMsImV4cCI6MjA4NzE4MzQzM30.EvHOy5sBbXzSxjRS5vPGzm8cnFrOXxDfclP-ru3VU_M';
@@ -143,7 +154,13 @@ function createBubble(cameraDeviceId) {
 function createRecorder(opts) {
   recorderWin = new BrowserWindow({
     width: 400, height: 300, show: false,
-    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true },
+    // The whole capture pipeline (rAF draw loop + <video> decode + MediaRecorder)
+    // runs in this hidden window. Without backgroundThrottling:false, Chromium
+    // throttles a hidden window's rAF/timers/video decode after ~60s ("intensive
+    // throttling"), which freezes the canvas and produces a black recording while
+    // the clock keeps ticking. Keeping it false reports the page as visible so the
+    // draw loop and video frames keep flowing.
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, backgroundThrottling: false },
   });
   recorderWin.loadFile('src/recorder.html');
   recorderWin.webContents.once('did-finish-load', () => {

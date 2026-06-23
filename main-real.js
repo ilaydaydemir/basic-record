@@ -150,20 +150,28 @@ function createBubble(cameraDeviceId) {
   bubbleWin.on('closed', () => { bubbleWin = null; });
 }
 
-// ── Recorder (hidden) ──────────────────────────────────────
+// ── Recorder (off-screen, never seen, but kept "visible") ──────────────────
 function createRecorder(opts) {
   recorderWin = new BrowserWindow({
-    width: 400, height: 300, show: false,
-    // The whole capture pipeline (rAF draw loop + <video> decode + MediaRecorder)
-    // runs in this hidden window. Without backgroundThrottling:false, Chromium
-    // throttles a hidden window's rAF/timers/video decode after ~60s ("intensive
-    // throttling"), which freezes the canvas and produces a black recording while
-    // the clock keeps ticking. Keeping it false reports the page as visible so the
-    // draw loop and video frames keep flowing.
+    width: 400, height: 300,
+    // Park it far off every display so the user never sees it. We deliberately
+    // do NOT use show:false: a hidden window is what Chromium/macOS keeps trying
+    // to sleep — it throttles the rAF draw loop + <video> decode and can reclaim
+    // the canvas GPU surface mid-recording, turning a long recording black. An
+    // off-screen-but-visible window never enters that hidden/occluded state, so
+    // the capture pipeline (canvas.captureStream + MediaRecorder) runs at full
+    // rate for the entire recording, hour-long ones included.
+    x: -20000, y: -20000,
+    show: false,            // created hidden, then shown inactive off-screen below
+    skipTaskbar: true,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true, backgroundThrottling: false },
   });
   recorderWin.loadFile('src/recorder.html');
   recorderWin.webContents.once('did-finish-load', () => {
+    // showInactive() puts the window in the "visible" rendering state (no
+    // throttling / occlusion) without focusing or interrupting the user.
+    recorderWin.setPosition(-20000, -20000);
+    recorderWin.showInactive();
     recorderWin.webContents.send('start', opts);
   });
   recorderWin.on('closed', () => { recorderWin = null; });
